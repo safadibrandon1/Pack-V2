@@ -19,6 +19,7 @@ Suitelet SPA — no WMS module, no SCM Mobile, and no Scheduled Script dependenc
 - The following custom lists must exist in the target account (confirm before deployment):
   - `custlist_lime_pack_weight_unit` — values: **LB**, **KG**
   - `custlist_lime_pack_dim_unit`    — values: **IN**, **CM**
+  - `customlist_lime_volume_units`   — values: **CU M**, **CU F**
 
 ---
 
@@ -39,6 +40,14 @@ If the lists above do not yet exist, create them:
 - ID: `custlist_lime_pack_dim_unit`
 - Add values: `IN`, `CM`
 - Save
+
+**List 3 — Volume Units:**
+- Name: `Volume Units`
+- ID: `customlist_lime_volume_units`
+- Add values: `CU M`, `CU F`
+- Save
+
+> **Volume unit defaulting:** `CU M` (cubic metres) is selected when the package's Dimension Unit is `CM` (metric); `CU F` (cubic feet) is selected when the Dimension Unit is `IN` (imperial).
 
 > The Pack Orders system uses the native Item Fulfillment **Ship Status** field
 > (`shipstatus`) — values A (Picked), B (Packed), C (Shipped). No custom status
@@ -95,9 +104,11 @@ One record per pallet/box created during a packing session.
    | Width              | `_lime_ship_unit_width`  | Decimal                                           | No       |
    | Height             | `_lime_ship_unit_height` | Decimal                                           | No       |
    | Weight             | `_lime_ship_unit_weight` | Decimal                                           | No       |
-   | Packing Notes      | `_lime_ship_unit_note`   | Long Text                                         | No       |
-   | Unpacked           | `_lime_ship_unit_status` | Checkbox (default: unchecked)                     | No       |
-   | Shipment Summary   | `_lime_ship_unit_summ`   | List/Record → Shipment Summary                    | No       |
+   | Packing Notes        | `_lime_ship_unit_note`     | Long Text                                              | No       |
+   | Unpacked             | `_lime_ship_unit_status`   | Checkbox (default: unchecked)                          | No       |
+   | Shipment Summary     | `_lime_ship_unit_summ`     | List/Record → Shipment Summary                         | No       |
+   | Ship Unit Volume     | `_lime_ship_unit_vol`      | Decimal — auto-calculated as L × W × H                | No       |
+   | Ship Unit Volume Unit| `_lime_ship_unit_vol_unit` | List/Record → `customlist_lime_volume_units`           | No       |
 
    > **Shipment Summary** must be created (Step 4) before this field can reference it.
    > Create the Ship Unit record type first, add all other fields, then return to add
@@ -131,9 +142,11 @@ One record per packing session. Groups all Ship Units and carries session-level 
    | Ship Summary Fulfillments | `_lime_ss_fulfillments`    | Multiple Select → Transaction                  | No       |
    | Inventory Status       | `_lime_ss_inventory_status`   | List/Record → Inventory Status                 | No       |
    | Shipment Sent to OTM?  | *(add as needed)*             | Checkbox (default: unchecked)                  | No       |
-   | Unpacked               | `_lime_ss_unpacked`           | Checkbox (default: unchecked)                  | No       |
-   | Unpacked Date          | `_lime_ss_unpack_date`        | Date/Time with Timezone                        | No       |
-   | Shipment Summary       | `_lime_ss_summary`            | Long Text                                      | No       |
+   | Unpacked               | `_lime_ss_unpacked`           | Checkbox (default: unchecked)                              | No       |
+   | Unpacked Date          | `_lime_ss_unpack_date`        | Date/Time with Timezone                                    | No       |
+   | Shipment Summary       | `_lime_ss_summary`            | Long Text                                                  | No       |
+   | Aggregate Volume       | `_lime_ss_volume`             | Decimal — sum of all Ship Unit volumes for this session    | No       |
+   | Volume Unit            | `_lime_ss_vol_unit`           | List/Record → `customlist_lime_volume_units`               | No       |
 
    > **Location** (`_lime_ss_location`) is auto-stamped as the Item Fulfillment's "Ship From" location (not the logged-in user's default location).
    >
@@ -149,52 +162,18 @@ One record per packing session. Groups all Ship Units and carries session-level 
    > Format: `Pallet #1: 48 x 40 x 66 - 846 lbs //Pallet #2: 48 x 40 x 76 - 456 lbs //`
    >
    > **Record Name** is auto-generated from the IF transaction numbers joined with dashes (e.g. `IF-1001-IF-1002`).
+   >
+   > **Aggregate Volume** (`_lime_ss_volume`) is auto-calculated as the sum of L × W × H across all Ship Units in the session.
+   >
+   > **Volume Unit** (`_lime_ss_vol_unit`) is auto-set based on the Dimension Unit of the packages: `CM` → `CU M`; `IN` → `CU F`.
 
 3. **Return to Ship Unit (Step 3)** and add the Shipment Summary field now that the record type exists.
 
 ---
 
-## Step 5 — Create Ship Unit Item Record
+## Step 5 — Upload Scripts to File Cabinet
 
-One record per item-pallet assignment. Captures exactly which items (and quantities) went
-into each physical Ship Unit.
-
-> **Dependency:** Ship Unit (Step 3) must exist before this record type can reference it.
-
-1. **Customization > Lists, Records & Fields > Record Types > New**
-   - Name: `Ship Unit Item`
-   - ID: `_lime_ship_unit_item` (NetSuite will prefix with `customrecord`)
-   - Allow Inline Editing: Yes
-   - Allow Attachments: No
-   - Save
-
-2. **Add fields** (on the record type's Fields subtab):
-
-   | Field Label                  | ID (no prefix)           | Type                                         | Required |
-   |------------------------------|--------------------------|----------------------------------------------|----------|
-   | Ship Unit                    | `_lime_sui_parent`       | List/Record → Ship Unit                      | Yes      |
-   | Parent Ship Unit Summary     | `_lime_sui_summary`      | List/Record → Shipment Summary               | No       |
-   | Ship Unit Order              | `_lime_sui_order`        | List/Record → Transaction (Transfer Order)   | No       |
-   | Item                         | `_lime_sui_item`         | List/Record → Item (all item types, `-10`)   | Yes      |
-   | Quantity                     | `_lime_sui_quantity`     | Integer                                      | Yes      |
-   | Item Fulfillment             | `_lime_sui_fulfillment`  | List/Record → Transaction (Item Fulfillment) | No       |
-   | IF Line #                    | `_lime_sui_line_num`     | Integer                                      | No       |
-   | Ship Unit Item Pack Location | `_lime_sui_pack_loc`     | List/Record → Location                       | No       |
-   | Ship Unit Item Delivery Location | `_lime_sui_deliv_loc` | List/Record → Location                      | No       |
-
-   > **Parent Ship Unit Summary** links directly to the Shipment Summary for the session — allows searching Ship Unit Items by summary without a sublist join.
-   >
-   > **Ship Unit Order** links to the Transfer Order the line was drawn from — useful when multiple TOs are packed in a single session.
-   >
-   > **Item Fulfillment** and **IF Line #** link each packed quantity back to the specific fulfillment line it was pulled from (used for traceability).
-   >
-   > **Ship Unit Item Pack Location** and **Ship Unit Item Delivery Location** are sourced automatically from the linked Shipment Summary's Location and Delivery Location fields respectively. Configure these as **Source** fields on the record type pointing to the Parent Ship Unit Summary record.
-
----
-
-## Step 6 — Upload Scripts to File Cabinet
-
-### 6a — Upload files
+### 5a — Upload files
 
 1. Navigate to **Documents > Files > File Cabinet**
 2. Create folder: `SuiteScripts/Packing/`
@@ -214,7 +193,7 @@ into each physical Ship Unit.
 
    > `pack_config.js` is a SuiteScript module (AMD define). Upload to the file cabinet only — no Script record needed.
 
-### 6b — Create Script records
+### 5b — Create Script records
 
 Navigate to **Customization > Scripting > Scripts > New** for each script below:
 
@@ -226,7 +205,7 @@ Navigate to **Customization > Scripting > Scripts > New** for each script below:
 | `rl_unpack_orders.js`       | RESTlet     | `customscript_lime_rl_unpack_fulfill`      | `customdeploy_lime_rl_unpack_fulfill`       |
 | `ue_fulfillment_buttons.js` | User Event  | `customscript_lime_ue_if_pack_btns`        | `customdeploy_lime_ue_if_pack_btns`         |
 
-### 6c — Create deployments
+### 5c — Create deployments
 
 For each script, create a deployment on the Script record's **Deployments** subtab.
 
@@ -249,7 +228,7 @@ For each script, create a deployment on the Script record's **Deployments** subt
 
 ---
 
-## Step 7 — Create Center Category (Navigation Links)
+## Step 6 — Create Center Category (Navigation Links)
 
 This step adds Pack Orders and Unpack Orders links to the **Transactions** tab of the Classic Center, allowing warehouse staff to access the suitelets directly without opening an order first.
 
@@ -279,11 +258,11 @@ After saving, users with access to the Transactions tab will see a **Pack Orders
 
 ---
 
-## Step 8 — Set Custom Record Permissions
+## Step 7 — Set Custom Record Permissions
 
 Grant **Edit** access on the following custom records to all relevant warehouse roles:
 
-**Applies to:** Ship Unit, Shipment Summary, Ship Unit Item
+**Applies to:** Ship Unit, Shipment Summary
 *(Package Type is read-only for non-admins — do **not** grant Edit on it)*
 
 1. Navigate to **Customization > Lists, Records & Fields > Record Types**
@@ -302,12 +281,12 @@ Grant **Edit** access on the following custom records to all relevant warehouse 
 4. Save each record type.
 
 > Without Edit permission, users in these roles will be unable to create or update
-> Ship Unit, Shipment Summary, or Ship Unit Item records during packing/unpacking,
+> Ship Unit or Shipment Summary records during packing/unpacking,
 > causing the suitelet to return a permissions error.
 
 ---
 
-## Step 9 — Verify Location Country Configuration
+## Step 8 — Verify Location Country Configuration
 
 The Packing Builder auto-detects whether the user's location is in the United States
 to default weight units (LB/KG) and dimension units (IN/CM).
@@ -322,7 +301,7 @@ This drives the unit defaults shown to warehouse staff in the packing form.
 
 ---
 
-## Step 10 — Testing Checklist
+## Step 9 — Testing Checklist
 
 ### Pack Orders Flow (Suitelet popup):
 - [ ] Open an Item Fulfillment in **Picked** status created from a Transfer Order
@@ -333,25 +312,28 @@ This drives the unit defaults shown to warehouse staff in the packing form.
 - [ ] Selecting orders with **different destinations** shows an error and blocks the selection
 - [ ] **"Build Pack →"** is disabled until at least one order is selected
 - [ ] Selecting an order and clicking "Build Pack →" navigates to the Packing Builder
-- [ ] Items panel (left) shows all items from selected fulfillments with quantities
-- [ ] Package Type dropdown is populated from `customrecord_lime_package_type` records
+- [ ] **Add Package(s) form** appears at the top of the builder
+- [ ] Selecting a Package Type auto-fills Length, Width, and Dimension Unit from the package type defaults
+- [ ] User enters Height, Weight, and Quantity; clicks **"Add Package(s)"**
+- [ ] Clicking "Add Package(s)" creates the specified number of identical package cards
+- [ ] Each generated package card is individually editable (Type, L, W, H, Dim Unit, Weight, Wt Unit)
+- [ ] Package Type dropdown on cards is populated from `customrecord_lime_package_type` records
 - [ ] Weight/Dim Unit dropdowns default per location country (US → LB/IN, non-US → KG/CM)
-- [ ] Adding item quantities to a pallet updates the progress bar in real time
-- [ ] **"Submit Packing"** remains disabled until all items are assigned 100% across all pallets
-- [ ] Over-assigned quantities highlight in red; the item bar turns red
+- [ ] **"Submit Packing"** remains disabled until at least one package exists with all required fields
+- [ ] Missing required fields highlight in red on the relevant card
 - [ ] Notes textarea accepts text and submits with the payload
 - [ ] Submitting creates:
   - [ ] 1 **Shipment Summary** with:
     - [ ] Name set to IF transaction numbers joined by dashes (e.g. `IF-1001-IF-1002`)
-    - [ ] Correct pkg count, aggregate weight, packed-by, and summary text
+    - [ ] Correct pkg count, aggregate weight, aggregate volume, packed-by, and summary text
+    - [ ] **Aggregate Volume** = sum of L × W × H across all packages
+    - [ ] **Volume Unit** = `CU M` for CM packages; `CU F` for IN packages
     - [ ] **Location** = Item Fulfillment's "Ship From" location
     - [ ] **Delivery Location** = Transfer Order's "Transfer To" location
     - [ ] **Ship Summary Orders** populated with all selected Transfer Orders
     - [ ] **Ship Summary Fulfillments** populated with all selected Item Fulfillments
     - [ ] **Inventory Status** populated from first inventory-tracked line (blank if no tracked items)
-  - [ ] 1 **Ship Unit** per pallet with dimensions, weight, package type, and linked fulfillments
-  - [ ] 1 **Ship Unit Item** per item-pallet assignment with quantity, fulfillment line reference, parent summary, and Transfer Order
-  - [ ] Note: if the same item is packed from **two different fulfillments** onto the same pallet, **two separate Ship Unit Item records** are created (one per fulfillment line) for full traceability
+  - [ ] 1 **Ship Unit** per package with dimensions, weight, volume, volume unit, package type, and linked fulfillments
 - [ ] All selected Item Fulfillments updated to **Packed** (`shipstatus = B`)
 - [ ] Popup notifies opener; Item Fulfillment page reloads automatically
 - [ ] After reload, **"Manage Packing"** button still shows (now opens Unpack flow)
@@ -367,7 +349,6 @@ This drives the unit defaults shown to warehouse staff in the packing form.
 - [ ] On confirm, all Ship Units linked to the selected TOs are marked Unpacked (no partial selection)
 - [ ] All linked Item Fulfillments revert to **Picked** (`shipstatus = A`)
 - [ ] Shipment Summary **Unpacked** checkbox set and **Unpacked Date** stamped if all its Ship Units are now unpacked
-- [ ] Ship Unit Item records are left intact (not deleted)
 - [ ] Success message shows correct package and fulfillment counts
 - [ ] Footer shows only a **"Close"** button after successful unpack
 - [ ] Popup notifies opener; Item Fulfillment page reloads automatically
@@ -378,26 +359,13 @@ This drives the unit defaults shown to warehouse staff in the packing form.
 - [ ] Both links open the respective suitelet directly (no order context required)
 - [ ] Opening from navigation (no IF context) shows all eligible orders with none pre-selected
 
-### TMS Saved Search (recommended — create after deployment):
+### TMS / OTM Saved Search (recommended — create after deployment):
+
 - Navigate to **Reports > Saved Searches > All Saved Searches > New**
 - Record Type: **Ship Unit**
 - Criteria: `Unpacked` is `false`
-- This gives TMS all active (non-reversed) packages for shipment planning.
-
-### OTM Export Saved Search (`customsearch_lime_otm_ship_unit_item_exp`):
-
-This saved search must exist in the target account before OTM integration is active.
-
-| Field        | Value                                              |
-|--------------|----------------------------------------------------|
-| Name         | `***DO NOT MODIFY-OTM SHIPMENT EXPORT`             |
-| ID           | `customsearch_lime_otm_ship_unit_item_exp`         |
-| Record Type  | **Ship Unit Item**                                 |
-| Purpose      | Exports Ship Unit Item data for loading into OTM   |
-
-> **Do not modify this search** — its columns and filters are consumed directly by the OTM integration. Changes to column order, field IDs, or criteria will break the OTM data load.
->
-> The search should include at minimum: Ship Unit, Parent Ship Unit Summary, Ship Unit Order, Item, Quantity, Item Fulfillment, IF Line #, Ship Unit Item Pack Location, and Ship Unit Item Delivery Location.
+- Suggested columns: Internal ID, Name, Package Type, Length, Width, Height, Weight, Weight Unit, Volume, Volume Unit, Transfer Orders, Item Fulfillments, Shipment Summary
+- This gives TMS/OTM all active (non-reversed) packages with full dimensional and volume data for shipment planning.
 
 ---
 
@@ -405,11 +373,11 @@ This saved search must exist in the target account before OTM integration is act
 
 All scripts log to **System > Monitoring > Script Execution Logs**.
 
-| Script                                | What to look for                                        |
-|---------------------------------------|---------------------------------------------------------|
-| `customscript_lime_rl_pack_fulfill`   | getPickedFulfillments errors, item load, submitPacking  |
-| `customscript_lime_rl_unpack_fulfill` | Unpack operations, IF reverts, summary flag             |
-| `customscript_lime_ue_if_pack_btns`   | Button injection errors, createdfrom type lookup        |
+| Script                                | What to look for                                             |
+|---------------------------------------|--------------------------------------------------------------|
+| `customscript_lime_rl_pack_fulfill`   | getPickedFulfillments, getDropdownData, submitPacking        |
+| `customscript_lime_rl_unpack_fulfill` | Unpack operations, IF reverts, summary flag                  |
+| `customscript_lime_ue_if_pack_btns`   | Button injection errors, createdfrom type lookup             |
 
 Change log level to `Error` in production deployments to reduce noise.
 

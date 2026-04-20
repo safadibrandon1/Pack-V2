@@ -11,16 +11,13 @@
  * Backend for the Pack Orders Suitelet (sl_pack_orders.js).
  *
  * GET  ?action=getPickedFulfillments
- *   → { success, locationName, fulfillments: [{ ifId, ifTranId, toId, toTranId, destName }] }
+ *   → { success, orders: [{ toId, toTranId, sourceId, sourceName, destId, destName, fulfillments }] }
  *
- * GET  ?action=getFulfillmentItems&ifIds=1,2,3
- *   → { success, items: [{ ifId, ifTranId, lineNum, itemId, itemName, itemDesc, quantity }] }
- *
- * GET  ?action=getDropdownData
+ * GET  ?action=getDropdownData&ifIds=1,2,3
  *   → { success, packageTypes, weightUnits, dimUnits, defaultWuKey, defaultDuKey }
  *
  * POST { action: 'submitPacking', fulfillments, pallets, notes }
- *   → { success, summaryId, shipUnitCount, shipUnitItemCount }
+ *   → { success, summaryId, shipUnitCount }
  */
 define([
     'N/search',
@@ -32,7 +29,7 @@ define([
     '/SuiteScripts/Packing/lib/pack_config',
 ], (search, record, runtime, cache, query, log, CONFIG) => {
 
-    const { RECORDS, PKG_TYPE, SHIP_UNIT, SHIP_UNIT_ITEM, SUMMARY, IF_FIELDS, WMS_STATUS, LISTS } = CONFIG;
+    const { RECORDS, PKG_TYPE, SHIP_UNIT, SUMMARY, IF_FIELDS, WMS_STATUS, LISTS } = CONFIG;
 
     const CACHE_TTL = 900; // 15 min
 
@@ -43,7 +40,6 @@ define([
     };
 
     const getCached = (key, loaderFn) => {
-        // Read from cache; only trust non-empty arrays (empty could be a stale error result)
         let raw = null;
         try { raw = getPackCache().get({ key }); } catch (e) { /* ignore */ }
         if (raw) {
@@ -53,7 +49,6 @@ define([
             } catch (e) { /* fall through */ }
         }
         const result = loaderFn();
-        // Only cache non-empty arrays so transient failures don't poison the cache
         if (!Array.isArray(result) || result.length > 0) {
             try { getPackCache().put({ key, value: JSON.stringify(result), ttl: CACHE_TTL }); } catch (e) { /* ignore */ }
         }
@@ -66,9 +61,8 @@ define([
         let result;
         try {
             switch (params.action) {
-                case 'getPickedFulfillments': result = getPickedFulfillments();          break;
-                case 'getFulfillmentItems':   result = getFulfillmentItems(params.ifIds); break;
-                case 'getDropdownData':       result = getDropdownData(params.ifIds);  break;
+                case 'getPickedFulfillments': result = getPickedFulfillments();         break;
+                case 'getDropdownData':       result = getDropdownData(params.ifIds); break;
                 default: result = { success: false, error: 'Unknown GET action: ' + params.action };
             }
         } catch (e) {
@@ -103,9 +97,9 @@ define([
         search.create({
             type: 'itemfulfillment',
             filters: [
-                ['mainline',  'is',          'T'],
+                ['mainline',  'is',        'T'],
                 'AND',
-                ['trandate',  'onOrAfter',   cutoffStr],
+                ['trandate',  'onOrAfter', cutoffStr],
             ],
             columns: [
                 search.createColumn({ name: 'internalid' }),
@@ -144,84 +138,10 @@ define([
                     fulfillments: [],
                 };
             }
-            toMap[row.toId].fulfillments.push({
-                ifId:     row.ifId,
-                ifTranId: row.ifTranId,
-            });
+            toMap[row.toId].fulfillments.push({ ifId: row.ifId, ifTranId: row.ifTranId });
         });
 
-        return {
-            success: true,
-            orders:  Object.values(toMap),
-        };
-    };
-
-    // ─── getFulfillmentItems ──────────────────────────────────────────────────
-    // Loads item lines by reading each IF record directly.
-    //
-    // Search-based approaches are unreliable for IFs because NS produces 3 internal
-    // rows per item line (the three-line pattern), and which rows have GL accounts
-    // varies by item type (serialized vs non-serialized) and costing method — making
-    // any filter-based attempt to isolate the display row fragile.
-    //
-    // record.load reads the item sublist exactly as the user sees it: one entry per
-    // visible line, correct total quantity, no lot/serial expansion, no GL rows.
-    // lineNum = sublist index + 1, matching the visual row order on the form.
-
-    const getFulfillmentItems = (ifIdsParam) => {
-        if (!ifIdsParam) return { success: false, error: 'No ifIds provided.' };
-
-        const ifIds = String(ifIdsParam).split(',').map(id => id.trim()).filter(Boolean);
-        if (!ifIds.length) return { success: false, error: 'No valid IF IDs provided.' };
-
-        const items = [];
-
-        // Step 1: load each IF record and collect lines (itemId is internal ID at this stage)
-        ifIds.forEach((ifId) => {
-            try {
-                const ifRec  = record.load({ type: 'itemfulfillment', id: parseInt(ifId, 10) });
-                const tranId = String(ifRec.getValue({ fieldId: 'tranid' }));
-                const count  = ifRec.getLineCount({ sublistId: 'item' });
-
-                for (let i = 0; i < count; i++) {
-                    const qty = parseFloat(ifRec.getSublistValue({ sublistId: 'item', fieldId: 'quantity', line: i })) || 0;
-                    if (qty <= 0) continue;
-                    items.push({
-                        ifId,
-                        ifTranId: tranId,
-                        lineNum:  i + 1,
-                        itemId:   String(ifRec.getSublistValue({ sublistId: 'item', fieldId: 'item', line: i })),
-                        itemName: '',
-                        itemDesc: ifRec.getSublistValue({ sublistId: 'item', fieldId: 'memo', line: i }) || '',
-                        quantity: qty,
-                    });
-                }
-            } catch (e) {
-                log.error({ title: 'getFulfillmentItems load ' + ifId, details: e });
-            }
-        });
-
-        // Step 2: resolve display names for all unique item IDs in one search
-        const uniqueItemIds = [...new Set(items.map(it => it.itemId))].filter(Boolean);
-        if (uniqueItemIds.length) {
-            const nameMap = {};
-            search.create({
-                type: 'item',
-                filters: [['internalid', 'anyof', ...uniqueItemIds]],
-                columns: [
-                    search.createColumn({ name: 'internalid' }),
-                    search.createColumn({ name: 'itemid' }),       // item name/number (e.g. "1-SCRW-0011-01")
-                    search.createColumn({ name: 'displayname' }),  // display name if set separately
-                ],
-            }).run().each((r) => {
-                const id = String(r.getValue('internalid'));
-                nameMap[id] = r.getValue('itemid') || r.getValue('displayname') || id;
-                return true;
-            });
-            items.forEach((it) => { it.itemName = nameMap[it.itemId] || it.itemId; });
-        }
-
-        return { success: true, items };
+        return { success: true, orders: Object.values(toMap) };
     };
 
     // ─── getDropdownData ──────────────────────────────────────────────────────
@@ -231,22 +151,15 @@ define([
     const getDropdownData = (ifIdsParam) => {
         const packageTypes = getCached('packageTypes', fetchPackageTypes);
         const weightUnits  = getCached('weightUnits',  () => fetchListValues(LISTS.WEIGHT_UNIT));
-        const dimUnits     = getCached('dimUnits',      () => fetchListValues(LISTS.DIM_UNIT));
+        const dimUnits     = getCached('dimUnits',     () => fetchListValues(LISTS.DIM_UNIT));
 
         // Resolve location from IF, fall back to user's default location
         let locationId = null;
-        let ifLocationRaw = null;
         if (ifIdsParam) {
             try {
                 const firstIfId = String(ifIdsParam).split(',')[0].trim();
-                const ifFields  = search.lookupFields({
-                    type:    'itemfulfillment',
-                    id:      firstIfId,
-                    columns: ['location'],
-                });
-                ifLocationRaw = JSON.stringify(ifFields.location);
-                locationId = ifFields.location && ifFields.location[0]
-                    ? ifFields.location[0].value : null;
+                const ifFields  = search.lookupFields({ type: 'itemfulfillment', id: firstIfId, columns: ['location'] });
+                locationId = ifFields.location && ifFields.location[0] ? ifFields.location[0].value : null;
             } catch (e) {
                 log.error({ title: 'getDropdownData IF location lookup', details: e });
             }
@@ -254,18 +167,6 @@ define([
         if (!locationId) locationId = runtime.getCurrentUser().location || null;
 
         const locInfo = locationId ? getLocationInfo(locationId) : { isUS: false };
-
-        log.audit({
-            title: 'getDropdownData unit defaulting',
-            details: JSON.stringify({
-                ifIdsParam,
-                ifLocationRaw,
-                resolvedLocationId: locationId,
-                locInfo,
-                weightUnitNames: weightUnits.map(u => u.name),
-                dimUnitNames:    dimUnits.map(u => u.name),
-            }),
-        });
 
         const defaultWu = locInfo.isUS
             ? (weightUnits.find(u => u.name === 'LB') || weightUnits[0])
@@ -294,15 +195,13 @@ define([
 
     // ─── submitPacking ────────────────────────────────────────────────────────
     // Creates all records synchronously:
-    //   1. Shipment Summary
-    //   2. Ship Unit records (one per pallet)
-    //   3. Ship Unit Item records (one per item assignment per pallet)
-    //   4. Updates Item Fulfillments to "Packed" status
+    //   1. Shipment Summary (with aggregate weight and volume)
+    //   2. Ship Unit records (one per pallet, each with volume)
+    //   3. Updates Item Fulfillments to "Packed" status
     //
     // Expected body:
-    //   fulfillments: [{ ifId, toId, toTranId }]
-    //   pallets:      [{ pkgTypeId, length, width, height, weight, wuId, duId,
-    //                    items: [{ itemId, quantity, ifId, lineNum }] }]
+    //   fulfillments: [{ ifId, toId, toTranId, ifTranId, sourceId, destId }]
+    //   pallets:      [{ pkgTypeId, length, width, height, weight, wuId, duId }]
     //   notes:        string
 
     const submitPacking = (body) => {
@@ -314,14 +213,10 @@ define([
         if (!Array.isArray(pallets) || !pallets.length) {
             return { success: false, error: 'No packages defined. Add at least one package.' };
         }
-        // Each package must have a type, at least one item, and all dims/weight
         for (let i = 0; i < pallets.length; i++) {
             const p = pallets[i];
             if (!p.pkgTypeId) {
                 return { success: false, error: 'Package ' + (i + 1) + ' is missing a Package Type.' };
-            }
-            if (!Array.isArray(p.items) || !p.items.length) {
-                return { success: false, error: 'Package ' + (i + 1) + ' has no items assigned.' };
             }
             if (!(parseFloat(p.length) > 0) || !(parseFloat(p.width) > 0) ||
                 !(parseFloat(p.height) > 0) || !(parseFloat(p.weight) > 0)) {
@@ -334,31 +229,46 @@ define([
         const allToIds = [...new Set(fulfillments.map(f => parseInt(f.toId, 10)))];
         const allIfIds = [...new Set(fulfillments.map(f => parseInt(f.ifId, 10)))];
 
-        // Pack Location: sourced from the frontend payload (no extra lookup needed)
         const locationId = (fulfillments[0] && fulfillments[0].sourceId) ? fulfillments[0].sourceId : user.location;
+        const destId     = fulfillments[0] && fulfillments[0].destId ? parseInt(fulfillments[0].destId, 10) : null;
 
-        // Delivery Location: "Ship To" location (TO destination) from the fulfillments payload
-        const destId = fulfillments[0] && fulfillments[0].destId ? parseInt(fulfillments[0].destId, 10) : null;
+        // ── 1. Resolve dim unit labels for volume unit determination ──────────
+        const dimUnitsData = getCached('dimUnits', () => fetchListValues(LISTS.DIM_UNIT));
+        const duMap = {};
+        dimUnitsData.forEach(u => { duMap[String(u.id)] = u.name; });
 
-        // ── 1. Calculate session aggregates ──────────────────────────────────
-        const totalPkgCount = pallets.length;
-        let totalWeight = 0;
-        let sessionWuId = null;
+        const volumeUnits = getCached('volumeUnits', () => fetchListValues(LISTS.VOLUME_UNIT));
+        const volUnitCuM  = volumeUnits.find(u => u.name === 'CU M');
+        const volUnitCuF  = volumeUnits.find(u => u.name === 'CU F');
+
+        const getVolUnitId = (duId) => {
+            const duName = duMap[String(duId)] || '';
+            const isMetric = duName.toUpperCase() === 'CM';
+            const match = isMetric ? volUnitCuM : volUnitCuF;
+            return match ? String(match.id) : null;
+        };
+
+        // ── 2. Calculate session aggregates ───────────────────────────────────
+        let totalWeight    = 0;
+        let totalVolume    = 0;
+        let sessionWuId    = null;
+        let sessionVolUnit = null;
 
         pallets.forEach((p) => {
             totalWeight += (parseFloat(p.weight) || 0);
-            if (!sessionWuId && p.wuId) sessionWuId = p.wuId;
+            const vol = (parseFloat(p.length) || 0) * (parseFloat(p.width) || 0) * (parseFloat(p.height) || 0);
+            totalVolume += vol;
+            if (!sessionWuId && p.wuId)    sessionWuId    = p.wuId;
+            if (!sessionVolUnit && p.duId) sessionVolUnit = getVolUnitId(p.duId);
         });
 
-        // ── 1b. Build lookup maps for package type names and weight unit label ─
+        // ── 3. Build lookup maps for summary text ─────────────────────────────
         const pkgTypeMap = {};
         getCached('packageTypes', fetchPackageTypes).forEach(pt => { pkgTypeMap[String(pt.id)] = pt.name; });
 
         const wuMap = {};
         getCached('weightUnits', () => fetchListValues(LISTS.WEIGHT_UNIT)).forEach(u => { wuMap[String(u.id)] = u.name; });
 
-        // ── 1c. Build summary text ────────────────────────────────────────────
-        // Format: "{TypeName} #{N}: L x W x H - weight unit //{TypeName} #{N+1}: ..."
         const summaryText = pallets.map((p, i) => {
             const typeName = pkgTypeMap[String(p.pkgTypeId)] || 'Package';
             const L   = parseFloat(p.length)  || 0;
@@ -369,12 +279,11 @@ define([
             return `${typeName} #${i + 1}: ${L} x ${W} x ${H} - ${wt}${unit ? ' ' + unit : ''} //`;
         }).join('');
 
-        // ── 1d. Resolve inventory status from first available fulfillment line ──
-        // Walk the first IF's item sublist → inventorydetail subrecord → first assignment.
+        // ── 4. Resolve inventory status from first available fulfillment line ──
         let inventoryStatusId = null;
         try {
-            const firstIfRec  = record.load({ type: 'itemfulfillment', id: allIfIds[0] });
-            const lineCount   = firstIfRec.getLineCount({ sublistId: 'item' });
+            const firstIfRec = record.load({ type: 'itemfulfillment', id: allIfIds[0] });
+            const lineCount  = firstIfRec.getLineCount({ sublistId: 'item' });
             outer: for (let i = 0; i < lineCount; i++) {
                 try {
                     const invDetail = firstIfRec.getSublistSubrecord({ sublistId: 'item', fieldId: 'inventorydetail', line: i });
@@ -390,36 +299,34 @@ define([
             log.error({ title: 'submitPacking: inventory status lookup', details: e });
         }
 
-        // ── 2. Create Shipment Summary ───────────────────────────────────────
-        // Name = IF transaction numbers joined with dashes: "IF-1001-IF-1002"
-        const ifNums = [...new Set(fulfillments.map(f => f.ifTranId))].filter(Boolean);
+        // ── 5. Create Shipment Summary ────────────────────────────────────────
+        const ifNums      = [...new Set(fulfillments.map(f => f.ifTranId))].filter(Boolean);
         const summaryName = ifNums.length ? ifNums.join('-') : new Date().toISOString().slice(0, 10);
 
-        log.audit({
-            title: 'Creating Shipment Summary',
-            details: 'Processing fulfillments: ' + fulfillments.map(f => f.ifTranId).join(', ')
-        });
+        log.audit({ title: 'Creating Shipment Summary', details: 'Processing fulfillments: ' + ifNums.join(', ') });
 
         const summRec = record.create({ type: RECORDS.SHIPMENT_SUMMARY, isDynamic: false });
-        summRec.setValue({ fieldId: 'name',                value: summaryName });
-        summRec.setValue({ fieldId: SUMMARY.NOTES,         value: notes || '' });
-        summRec.setValue({ fieldId: SUMMARY.PKG_COUNT,     value: totalPkgCount });
-        summRec.setValue({ fieldId: SUMMARY.WEIGHT,        value: totalWeight });
-        summRec.setValue({ fieldId: SUMMARY.SUMMARY_TEXT,  value: summaryText });
-        if (sessionWuId)   summRec.setValue({ fieldId: SUMMARY.WU,          value: parseInt(sessionWuId, 10) });
-        if (user.id)       summRec.setValue({ fieldId: SUMMARY.PACKED_BY,   value: parseInt(user.id, 10) });
+        summRec.setValue({ fieldId: 'name',                     value: summaryName });
+        summRec.setValue({ fieldId: SUMMARY.NOTES,              value: notes || '' });
+        summRec.setValue({ fieldId: SUMMARY.PKG_COUNT,          value: pallets.length });
+        summRec.setValue({ fieldId: SUMMARY.WEIGHT,             value: totalWeight });
+        summRec.setValue({ fieldId: SUMMARY.VOLUME,             value: totalVolume });
+        summRec.setValue({ fieldId: SUMMARY.SUMMARY_TEXT,       value: summaryText });
+        if (sessionWuId)    summRec.setValue({ fieldId: SUMMARY.WU,          value: parseInt(sessionWuId, 10) });
+        if (sessionVolUnit) summRec.setValue({ fieldId: SUMMARY.VOLUME_UNIT, value: parseInt(sessionVolUnit, 10) });
+        if (user.id)        summRec.setValue({ fieldId: SUMMARY.PACKED_BY,   value: parseInt(user.id, 10) });
         summRec.setValue({ fieldId: SUMMARY.PACKED_DATE, value: new Date() });
         if (locationId)    summRec.setValue({ fieldId: SUMMARY.LOCATION,          value: parseInt(locationId, 10) });
         if (destId)        summRec.setValue({ fieldId: SUMMARY.DELIVERY_LOCATION, value: destId });
-        summRec.setValue({ fieldId: SUMMARY.ORDERS,        value: allToIds });
-        summRec.setValue({ fieldId: SUMMARY.FULFILLMENTS,  value: allIfIds });
+        summRec.setValue({ fieldId: SUMMARY.ORDERS,       value: allToIds });
+        summRec.setValue({ fieldId: SUMMARY.FULFILLMENTS, value: allIfIds });
         if (inventoryStatusId) summRec.setValue({ fieldId: SUMMARY.INVENTORY_STATUS, value: inventoryStatusId });
-        summRec.setValue({ fieldId: SUMMARY.UNPACKED,      value: false });
+        summRec.setValue({ fieldId: SUMMARY.UNPACKED, value: false });
 
         const summId = summRec.save();
         log.audit({ title: 'submitPacking', details: 'Created summary ' + summId });
 
-        // ── 3. Update all Item Fulfillments to "Packed" status ───────────────
+        // ── 6. Update all Item Fulfillments to "Packed" status ────────────────
         allIfIds.forEach((ifId) => {
             record.submitFields({
                 type:   'itemfulfillment',
@@ -428,15 +335,13 @@ define([
             });
         });
 
-        // ── 4. Create Ship Unit + Ship Unit Item records ──────────────────────
-        let shipUnitCount     = 0;
-        let shipUnitItemCount = 0;
-
-        // Build ifId → toId lookup for Ship Unit Item ORDER field
-        const ifToOrderMap = {};
-        fulfillments.forEach((f) => { ifToOrderMap[String(f.ifId)] = parseInt(f.toId, 10); });
+        // ── 7. Create Ship Unit records ───────────────────────────────────────
+        let shipUnitCount = 0;
 
         pallets.forEach((pallet, palletIdx) => {
+            const vol       = (parseFloat(pallet.length) || 0) * (parseFloat(pallet.width) || 0) * (parseFloat(pallet.height) || 0);
+            const volUnitId = getVolUnitId(pallet.duId);
+
             const unitRec = record.create({ type: RECORDS.SHIP_UNIT, isDynamic: false });
             unitRec.setValue({ fieldId: SHIP_UNIT.ORDERS,   value: allToIds });
             unitRec.setValue({ fieldId: SHIP_UNIT.FULFILL,  value: allIfIds });
@@ -445,37 +350,22 @@ define([
             unitRec.setValue({ fieldId: SHIP_UNIT.WIDTH,    value: parseFloat(pallet.width)   || 0 });
             unitRec.setValue({ fieldId: SHIP_UNIT.HEIGHT,   value: parseFloat(pallet.height)  || 0 });
             unitRec.setValue({ fieldId: SHIP_UNIT.WEIGHT,   value: parseFloat(pallet.weight)  || 0 });
-            if (pallet.wuId) unitRec.setValue({ fieldId: SHIP_UNIT.WU, value: parseInt(pallet.wuId, 10) });
-            if (pallet.duId) unitRec.setValue({ fieldId: SHIP_UNIT.DU, value: parseInt(pallet.duId, 10) });
+            unitRec.setValue({ fieldId: SHIP_UNIT.VOL,      value: vol });
+            if (pallet.wuId) unitRec.setValue({ fieldId: SHIP_UNIT.WU,       value: parseInt(pallet.wuId, 10) });
+            if (pallet.duId) unitRec.setValue({ fieldId: SHIP_UNIT.DU,       value: parseInt(pallet.duId, 10) });
+            if (volUnitId)   unitRec.setValue({ fieldId: SHIP_UNIT.VOL_UNIT, value: parseInt(volUnitId, 10) });
             unitRec.setValue({ fieldId: SHIP_UNIT.NOTE,    value: notes || '' });
             unitRec.setValue({ fieldId: SHIP_UNIT.STATUS,  value: false });
             unitRec.setValue({ fieldId: SHIP_UNIT.SUMMARY, value: summId });
+
             const unitId = unitRec.save();
             shipUnitCount++;
-            log.audit({ title: 'submitPacking', details: 'Ship unit ' + unitId + ' (pallet ' + (palletIdx + 1) + ')' });
-            (pallet.items || []).forEach((item) => {
-                const itemRec = record.create({ type: RECORDS.SHIP_UNIT_ITEM, isDynamic: false });
-                itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.PARENT,      value: unitId });
-                itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.SUMMARY,     value: summId });
-                itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.ITEM,        value: parseInt(item.itemId, 10) });
-                itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.QUANTITY,    value: parseInt(item.quantity, 10) });
-                itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.FULFILLMENT, value: parseInt(item.ifId, 10) });
-                itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.LINE_NUM,    value: parseInt(item.lineNum, 10) });
-                const toId = ifToOrderMap[String(item.ifId)];
-                if (toId) itemRec.setValue({ fieldId: SHIP_UNIT_ITEM.ORDER, value: toId });
-                itemRec.save();
-                shipUnitItemCount++;
-            });
+            log.audit({ title: 'submitPacking', details: 'Ship unit ' + unitId + ' (package ' + (palletIdx + 1) + '), volume: ' + vol });
         });
 
-        log.audit({ title: 'submitPacking', details: 'Complete: summary ' + summId + ', ' + shipUnitCount + ' ship units, ' + shipUnitItemCount + ' items.' });
+        log.audit({ title: 'submitPacking', details: 'Complete: summary ' + summId + ', ' + shipUnitCount + ' ship units, total volume: ' + totalVolume });
 
-        return {
-            success:          true,
-            summaryId:        String(summId),
-            shipUnitCount,
-            shipUnitItemCount,
-        };
+        return { success: true, summaryId: String(summId), shipUnitCount };
     };
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -510,7 +400,6 @@ define([
     const fetchListValues = (listId) => {
         const values = [];
 
-        // Approach 1: search.create with the list script ID as the record type
         try {
             search.create({
                 type: listId,
@@ -530,7 +419,6 @@ define([
             log.error({ title: 'fetchListValues search error for ' + listId, details: e });
         }
 
-        // Approach 2: SuiteQL — table name is the list script ID
         try {
             query.runSuiteQL({ query: 'SELECT id, name FROM ' + listId + ' ORDER BY id' })
                 .results.forEach((row) => {
@@ -548,9 +436,7 @@ define([
         try {
             const fields  = search.lookupFields({ type: 'location', id: locationId, columns: ['name', 'country'] });
             const country = String(fields.country || '');
-            const isUS    = country === 'US';
-            log.audit({ title: 'getLocationInfo', details: JSON.stringify({ locationId, country, isUS }) });
-            return { name: fields.name || '', isUS };
+            return { name: fields.name || '', isUS: country === 'US' };
         } catch (e) {
             log.error({ title: 'getLocationInfo error', details: e });
             return { name: '', isUS: false };

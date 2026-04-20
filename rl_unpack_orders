@@ -15,12 +15,11 @@
  *   → { success, shipUnits: [{ id, name, pkgTypeName, length, width, height,
  *                              weight, wuName, duName, unpacked }] }
  *
- * POST body: { action: 'unpackShipUnits', shipUnitIds: [id, ...] }
- *   → { success, unpacked: N, ifsReverted: N, itemsDeleted: N }
+ * POST body: { action: 'unpackShipUnits', toIds: [id, ...] }
+ *   → { success, unpacked: N, ifsReverted: N }
  *
  * Unpack logic:
- *   · Delete all Ship Unit Item records linked to the selected ship units
- *   · Mark each selected ship unit: custrecord_lime_ship_unit_status = true (unpacked)
+ *   · Mark each active ship unit: custrecord_lime_ship_unit_status = true (unpacked)
  *   · Collect all IFs linked to the selected ship units
  *   · Revert ALL linked IFs back to "Picked" WMS status (all-or-nothing per the
  *     confirmed requirement — reversing any packing reverts the full fulfillment)
@@ -34,7 +33,7 @@ define([
     '/SuiteScripts/Packing/lib/pack_config',
 ], (search, record, runtime, log, CONFIG) => {
 
-    const { RECORDS, SHIP_UNIT, SHIP_UNIT_ITEM, SUMMARY, IF_FIELDS, WMS_STATUS } = CONFIG;
+    const { RECORDS, SHIP_UNIT, SUMMARY, IF_FIELDS, WMS_STATUS } = CONFIG;
 
     // ─── GET ─────────────────────────────────────────────────────────────────
 

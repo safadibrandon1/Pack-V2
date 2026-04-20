@@ -5,8 +5,6 @@
  * @NModuleScope Public
  *
  * Centralized record/field/script IDs for the Pack/Unpack Suitelet system.
- * Reuses the same custom records as the WMS customization (Ship Unit,
- * Shipment Summary, Package Type) and adds the new Ship Unit Item record.
  *
  * !! VERIFY ALL IDs IN TARGET ACCOUNT BEFORE DEPLOYMENT !!
  */
@@ -16,7 +14,6 @@ define([], () => {
     const RECORDS = {
         PACKAGE_TYPE:     'customrecord_lime_package_type',
         SHIP_UNIT:        'customrecord_lime_ship_unit',
-        SHIP_UNIT_ITEM:   'customrecord_lime_ship_unit_item',
         SHIPMENT_SUMMARY: 'customrecord_lime_shipment_summary',
     };
 
@@ -37,22 +34,13 @@ define([], () => {
         LENGTH:   'custrecord_lime_ship_unit_length',
         WIDTH:    'custrecord_lime_ship_unit_width',
         HEIGHT:   'custrecord_lime_ship_unit_height',
-        PKG_TYPE: 'custrecord_lime_ship_unit_pt',      // LIST/RECORD → custrecord_lime_package_type
+        PKG_TYPE: 'custrecord_lime_ship_unit_pt',      // LIST/RECORD → customrecord_lime_package_type
         WEIGHT:   'custrecord_lime_ship_unit_weight',
         NOTE:     'custrecord_lime_ship_unit_note',
         STATUS:   'custrecord_lime_ship_unit_status',  // CHECKBOX — true = unpacked
-        SUMMARY:  'custrecord_lime_ship_unit_summ',    // LIST/RECORD → custrecord_lime_shipment_summary
-    };
-
-    /** Fields on the Ship Unit Item custom record (NEW) */
-    const SHIP_UNIT_ITEM = {
-        PARENT:      'custrecord_lime_sui_parent',       // LIST/RECORD → custrecord_lime_ship_unit
-        SUMMARY:     'custrecord_lime_sui_summary',      // LIST/RECORD → custrecord_lime_shipment_summary
-        ORDER:       'custrecord_lime_sui_order',        // LIST/RECORD → Transfer Order transaction
-        ITEM:        'custrecord_lime_sui_item',         // LIST/RECORD → item
-        QUANTITY:    'custrecord_lime_sui_quantity',      // INTEGER
-        FULFILLMENT: 'custrecord_lime_sui_fulfillment',  // LIST/RECORD → transaction (IF)
-        LINE_NUM:    'custrecord_lime_sui_line_num',      // INTEGER — line # on the fulfillment
+        SUMMARY:  'custrecord_lime_ship_unit_summ',    // LIST/RECORD → customrecord_lime_shipment_summary
+        VOL:      'custrecord_lime_ship_unit_vol',     // DECIMAL — L × W × H for this unit
+        VOL_UNIT: 'custrecord_lime_ship_unit_vol_unit', // LIST → customlist_lime_volume_units
     };
 
     /** Fields on the Shipment Summary custom record */
@@ -71,6 +59,8 @@ define([], () => {
         UNPACKED:          'custrecord_lime_ss_unpacked',
         UNPACK_DATE:       'custrecord_lime_ss_unpack_date',
         SUMMARY_TEXT:      'custrecord_lime_ss_summary',
+        VOLUME:            'custrecord_lime_ss_volume',            // DECIMAL — sum of all ship unit volumes
+        VOLUME_UNIT:       'custrecord_lime_ss_vol_unit',          // LIST → customlist_lime_volume_units
     };
 
     /** Body fields on Item Fulfillment */
@@ -81,10 +71,10 @@ define([], () => {
 
     /** shipstatus display values (search) and internal keys (write) */
     const WMS_STATUS = {
-        PICKED:      'picked', // search column value
-        PACKED:      'packed', // search column value
+        PICKED:      'picked',
+        PACKED:      'packed',
         SHIPPED:     'shipped',
-        PICKED_KEY:  'A',      // internal shipstatus key — use with WMS_STATUS_WRITE
+        PICKED_KEY:  'A',
         PACKED_KEY:  'B',
         SHIPPED_KEY: 'C',
     };
@@ -93,27 +83,27 @@ define([], () => {
     const LISTS = {
         WEIGHT_UNIT: 'customlist_lime_pack_weight_unit',
         DIM_UNIT:    'customlist_lime_pack_dim_unit',
+        VOLUME_UNIT: 'customlist_lime_volume_units',
     };
 
     /** Script and deployment IDs for the Packing Suitelet system */
     const SCRIPTS = {
-        PACK_SL:              'customscript_lime_sl_pack_fulfill',
-        PACK_SL_DEPLOY:       'customdeploy_lime_sl_pack_fulfill',
-        PACK_RL:              'customscript_lime_rl_pack_fulfill',
-        PACK_RL_DEPLOY:       'customdeploy_lime_rl_pack_fulfill',
-        UNPACK_SL:            'customscript_lime_sl_unpack_fulfill',
-        UNPACK_SL_DEPLOY:     'customdeploy_lime_sl_unpack_fulfill',
-        UNPACK_RL:            'customscript_lime_rl_unpack_fulfill',
-        UNPACK_RL_DEPLOY:     'customdeploy_lime_rl_unpack_fulfill',
-        UE_IF_BUTTONS:        'customscript_lime_ue_if_pack_btns',
-        UE_IF_BUTTONS_DEP:    'customdeploy_lime_ue_if_pack_btns',
+        PACK_SL:           'customscript_lime_sl_pack_fulfill',
+        PACK_SL_DEPLOY:    'customdeploy_lime_sl_pack_fulfill',
+        PACK_RL:           'customscript_lime_rl_pack_fulfill',
+        PACK_RL_DEPLOY:    'customdeploy_lime_rl_pack_fulfill',
+        UNPACK_SL:         'customscript_lime_sl_unpack_fulfill',
+        UNPACK_SL_DEPLOY:  'customdeploy_lime_sl_unpack_fulfill',
+        UNPACK_RL:         'customscript_lime_rl_unpack_fulfill',
+        UNPACK_RL_DEPLOY:  'customdeploy_lime_rl_unpack_fulfill',
+        UE_IF_BUTTONS:     'customscript_lime_ue_if_pack_btns',
+        UE_IF_BUTTONS_DEP: 'customdeploy_lime_ue_if_pack_btns',
     };
 
     return {
         RECORDS,
         PKG_TYPE,
         SHIP_UNIT,
-        SHIP_UNIT_ITEM,
         SUMMARY,
         IF_FIELDS,
         WMS_STATUS,
