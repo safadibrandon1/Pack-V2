@@ -1,0 +1,1081 @@
+/**
+ * sl_pack_orders.js — Pack Orders Suitelet (Single-Page Application)
+ *
+ * @NApiVersion 2.1
+ * @NScriptType Suitelet
+ * @NModuleScope Public
+ *
+ * Script ID  : customscript_lime_sl_pack_fulfill
+ * Deploy ID  : customdeploy_lime_sl_pack_fulfill
+ *
+ * Two-screen SPA for warehouse staff to pack Transfer Order fulfillments:
+ *
+ *   SCREEN 1 — Order Selection
+ *     · Lists all Item Fulfillments in "Picked" status at the user's location.
+ *     · Accepts optional `ifId` URL parameter — auto-selects the matching order.
+ *     · "Build Pack →" moves to the packing builder.
+ *
+ *   SCREEN 2 — Packing Builder
+ *     · Shows all items from selected fulfillments with total quantities.
+ *     · Warehouse staff adds pallets/boxes and assigns items + quantities.
+ *     · Real-time "remaining" counter per item — must reach 0 to submit.
+ *     · Each pallet has: Package Type (auto-fills dims), L/W/H, Weight, Units.
+ *     · "Submit Packing" calls rl_pack_orders → submitPacking:
+ *         - Creates Shipment Summary record
+ *         - Creates Ship Unit record per pallet
+ *         - Creates Ship Unit Item record per item-pallet assignment
+ *         - Updates fulfillments to "Packed" status
+ *     · On success, posts PACKING_COMPLETE message to opener.
+ */
+define([
+    'N/runtime',
+    'N/url',
+    'N/log',
+    '/SuiteScripts/Packing/lib/pack_config',
+], (runtime, url, log, CONFIG) => {
+
+    const { SCRIPTS } = CONFIG;
+
+    const onRequest = (ctx) => {
+        log.debug('POST Triggered');
+        if (ctx.request.method !== 'GET') {
+            ctx.response.write(JSON.stringify({ error: 'Method not allowed' }));
+            return;
+        }
+
+        try {
+            log.debug({
+                title: 'Packing UI Loaded',
+                details: 'User: ' + runtime.getCurrentUser().name
+            });
+            const restletUrl = url.resolveScript({
+                scriptId: SCRIPTS.PACK_RL,
+                deploymentId: SCRIPTS.PACK_RL_DEPLOY,
+                returnExternalUrl: false,
+            });
+            log.debug('Restlet called',restletUrl);
+
+            const ifId = ctx.request.parameters.ifId || '';
+
+            ctx.response.setHeader({ name: 'Content-Type', value: 'text/html; charset=UTF-8' });
+            ctx.response.write(buildPage(restletUrl, ifId));
+        } catch (e) {
+            log.error({ title: 'sl_pack_orders GET error', details: e });
+            ctx.response.write('<p style="color:red;font-family:sans-serif">Error: ' + e.message + '</p>');
+        }
+    };
+
+    const buildPage = (restletUrl, ifId) => /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>Pack Orders</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    :root {
+      --navy: #003366; --navy2: #004080; --blue-lt: #dce8f8;
+      --border: #ccc; --text: #222; --muted: #666;
+      --danger: #c00; --success: #1a6e1a; --warn: #b35c00;
+      --green-lt: #edfaed; --red-lt: #fff0f0; --yellow-lt: #fffbe6;
+    }
+    body { font-family: Arial, sans-serif; font-size: 14px; color: var(--text);
+           background: #f0f2f5; min-height: 100vh; display: flex; flex-direction: column; }
+
+    /* ── Screens ── */
+    .screen { display: none; flex-direction: column; height: 100vh; overflow: hidden; }
+    .screen.active { display: flex; }
+
+    /* ── Header / Footer ── */
+    header { background: var(--navy); color: #fff; padding: 11px 14px;
+             display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+    header h1 { font-size: 15px; font-weight: bold; flex: 1; }
+    header .loc { font-size: 12px; opacity: .8; }
+    .body { flex: 1; overflow-y: auto; padding: 12px; }
+    footer { background: #efefef; border-top: 1px solid var(--border);
+             padding: 10px 12px; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+    .footer-msg { flex: 1; font-size: 12px; color: var(--danger); }
+
+    /* ── Buttons ── */
+    .btn { padding: 9px 18px; border: none; border-radius: 4px; cursor: pointer;
+           font-size: 14px; font-weight: bold; touch-action: manipulation; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary   { background: var(--navy);   color: #fff; }
+    .btn-primary:hover:not(:disabled)   { background: var(--navy2); }
+    .btn-secondary { background: #ddd; color: #333; }
+    .btn-secondary:hover:not(:disabled) { background: #c8c8c8; }
+    .btn-danger    { background: var(--danger); color: #fff; }
+    .btn-danger:hover:not(:disabled)    { background: #a00; }
+    .btn-success   { background: #1a6e1a; color: #fff; }
+    .btn-success:hover:not(:disabled)   { background: #155815; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; font-weight: normal; }
+
+    /* ── Scan bar ── */
+    .scan-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+    .scan-bar input { flex: 1; padding: 9px 12px; border: 2px solid var(--navy);
+                      border-radius: 4px; font-size: 14px; }
+    .scan-bar input:focus { outline: none; border-color: #0055aa;
+                            box-shadow: 0 0 0 2px rgba(0,85,170,.2); }
+
+    /* ── Order cards ── */
+    .order-list { display: flex; flex-direction: column; gap: 8px; }
+    .order-card { background: #fff; border: 1px solid var(--border); border-radius: 6px;
+                  padding: 10px 12px; cursor: pointer; transition: border-color .15s; }
+    .order-card:hover { border-color: var(--navy); }
+    .order-card.selected { border-color: var(--navy); background: var(--blue-lt); }
+    .order-card-top { display: flex; align-items: center; gap: 10px; }
+    .order-cb  { width: 18px; height: 18px; cursor: pointer; flex-shrink: 0; }
+    .order-num  { font-weight: bold; font-size: 15px; flex: 1; }
+    .order-dest { font-size: 12px; color: var(--muted); }
+    .order-ifs  { font-size: 12px; color: var(--muted); margin-top: 5px; padding-left: 28px; }
+
+    /* ── Alerts ── */
+    .alert { border-radius: 4px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
+    .alert-info  { background: #e8f0fb; border: 1px solid #b0c8f0; color: #003; }
+    .alert-error { background: var(--red-lt);   border: 1px solid #f0b0b0; color: var(--danger); }
+    .alert-ok    { background: var(--green-lt); border: 1px solid #a0d0a0; color: var(--success); }
+    .alert-warn  { background: var(--yellow-lt);border: 1px solid #e0c050; color: var(--warn); }
+
+    /* ── Spinner ── */
+    .spinner-wrap { text-align: center; padding: 40px 20px; color: var(--muted); }
+    .spinner { display: inline-block; width: 28px; height: 28px; border: 4px solid #ccc;
+               border-top-color: var(--navy); border-radius: 50%;
+               animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Pallet Builder (Screen 2) ── */
+    .builder-layout { display: flex; gap: 12px; height: 100%; }
+
+    /* Left: item progress panel */
+    .item-panel { width: 340px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0; }
+    .panel-hdr { background: var(--navy); color: #fff; padding: 7px 10px;
+                 font-size: 13px; font-weight: bold; border-radius: 4px 4px 0 0; }
+    .item-scroll { flex: 1; overflow-y: auto; background: #fff;
+                   border: 1px solid var(--border); border-top: none; border-radius: 0 0 4px 4px; }
+    .item-row { padding: 7px 10px; border-bottom: 1px solid #f0f0f0; font-size: 12px; }
+    .item-row:last-child { border-bottom: none; }
+    .item-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .item-name { font-weight: bold; flex: 1; }
+    .item-qty-info { font-size: 11px; white-space: nowrap; }
+    .item-bar-wrap { height: 5px; background: #e0e0e0; border-radius: 3px; margin-top: 4px; }
+    .item-bar { height: 5px; border-radius: 3px; background: #aaa; transition: width .2s; }
+    .item-bar.complete  { background: #3a3; }
+    .item-bar.over      { background: var(--danger); }
+    .item-remaining     { font-size: 11px; margin-top: 2px; color: var(--muted); }
+    .item-remaining.ok  { color: var(--success); font-weight: bold; }
+    .item-remaining.bad { color: var(--danger);  font-weight: bold; }
+
+    /* Right: pallet area */
+    .pallet-panel { flex: 1; display: flex; flex-direction: column; gap: 0; min-width: 0; }
+    .pallet-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .pallet-toolbar-title { font-weight: bold; font-size: 13px; flex: 1; }
+    .pallet-scroll { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+
+    /* Pallet card */
+    .pallet-card { background: #fff; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+    .pallet-card-hdr { background: #e8eef6; padding: 7px 10px; display: flex;
+                       align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+    .pallet-num { font-weight: bold; font-size: 13px; flex: 1; }
+    .pallet-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .pallet-dims { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; }
+    .pallet-field { display: flex; flex-direction: column; gap: 2px; }
+    .pallet-field label { font-size: 11px; color: var(--muted); font-weight: bold; }
+    .pallet-field select, .pallet-field input[type="number"] {
+      padding: 5px 7px; border: 1px solid var(--border); border-radius: 3px;
+      font-size: 13px; width: 90px; }
+    .pallet-field select.wide { width: 160px; }
+    .pallet-field select:focus, .pallet-field input:focus { outline: none; border-color: var(--navy2); }
+    .pallet-field input.req-missing, .pallet-field select.req-missing { border-color: var(--danger) !important; background: #fff8f8; }
+    .req-star { color: var(--danger); }
+
+    /* Item assignment within a pallet */
+    .pallet-items-hdr { font-size: 12px; font-weight: bold; color: var(--muted);
+                        border-top: 1px solid #f0f0f0; padding-top: 8px; }
+    .pallet-item-row { display: flex; align-items: center; gap: 8px; padding: 4px 0;
+                       border-bottom: 1px solid #f8f8f8; font-size: 13px; }
+    .pallet-item-row:last-child { border-bottom: none; }
+    .pallet-item-name { flex: 1; }
+    .pallet-item-max  { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .pallet-item-qty  { width: 75px; padding: 4px 6px; border: 1px solid var(--border);
+                        border-radius: 3px; font-size: 13px; text-align: right; }
+    .pallet-item-qty:focus { outline: none; border-color: var(--navy2); }
+    .pallet-item-qty.over { border-color: var(--danger); background: #fff8f8; }
+
+    /* Notes + submit row */
+    .notes-row { display: flex; flex-direction: column; gap: 4px; }
+    .notes-row label { font-size: 12px; font-weight: bold; color: var(--muted); }
+    .notes-row textarea { width: 100%; padding: 7px; border: 1px solid var(--border);
+                          border-radius: 3px; font-size: 13px; resize: vertical; min-height: 52px; }
+    .notes-row textarea:focus { outline: none; border-color: var(--navy2); }
+
+    /* misc */
+    .section-hdr { font-weight: bold; font-size: 13px; background: #e4e4e4;
+                   padding: 6px 10px; border-radius: 4px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     SCREEN 1 — Order Selection
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<div class="screen" id="sc-orders">
+  <header>
+    <h1>Pack Orders</h1>
+    <span class="loc" id="hdr-location">Loading…</span>
+  </header>
+
+  <div class="body">
+    <div class="scan-bar">
+      <input type="text" id="scan-input" placeholder="Filter by TO number (e.g. TO-1234)…"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+    </div>
+
+    <div id="orders-loading" class="spinner-wrap">
+      <div class="spinner"></div>
+      <p style="margin-top:12px">Loading picked orders…</p>
+    </div>
+
+    <div id="orders-error" class="alert alert-error" style="display:none"></div>
+
+    <div id="orders-filter-note" class="alert alert-info" style="display:none;margin-bottom:8px"></div>
+    <div id="order-list" class="order-list" style="display:none"></div>
+
+    <div id="orders-empty" class="alert alert-info" style="display:none">
+      No transfer orders are in Picked status for your location.
+    </div>
+  </div>
+
+  <footer>
+    <span class="footer-msg" id="orders-msg"></span>
+    <span style="font-size:12px;color:#555" id="sel-count"></span>
+    <button class="btn btn-primary" id="btn-build-pack" onclick="goToBuildPack()" disabled>
+      Build Pack &rarr;
+    </button>
+  </footer>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     SCREEN 2 — Packing Builder  (HTML added in Chunk 2)
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<div class="screen" id="sc-builder">
+  <header>
+    <h1 id="builder-title">Pack Orders</h1>
+  </header>
+  <div class="body" id="builder-loading-wrap">
+    <div class="spinner-wrap">
+      <div class="spinner"></div>
+      <p style="margin-top:12px">Loading items &amp; package types…</p>
+    </div>
+  </div>
+  <footer>
+    <span class="footer-msg" id="builder-msg"></span>
+    <button class="btn btn-secondary" onclick="backToOrders()">← Pack Additional Orders</button>
+    <button class="btn btn-success" id="btn-submit-pack" style="" disabled>
+      Submit Packing
+    </button>
+    <button class="btn btn-secondary" id="btn-close-window" style="display:none" onclick="window.close()">Done</button>
+  </footer>
+</div>
+
+<script>
+const RESTLET_URL = ${JSON.stringify(restletUrl)};
+const PRE_SELECT_IF_ID = ${ifId ? JSON.stringify(String(ifId)) : 'null'};
+
+// ─── Global state ─────────────────────────────────────────────────────────────
+const S = {
+    locationName:   '',
+    orders:           [],   // [{ toId, toTranId, sourceId, sourceName, destId, destName, fulfillments:[{ifId,ifTranId}] }]
+    selectedToIds:    new Set(),
+    activeSource:     null, // sourceId of first selected order — limits co-selectable orders
+    activeSourceName: '',
+    activeDest:       null, // destId of first selected order — limits co-selectable orders
+    activeDestName:   '',
+    selectedIFIds:  [],   // flat list of all IF IDs from selected orders
+    // Screen 2
+    items:          [],   // raw lines from backend [{ ifId, ifTranId, lineNum, itemId, itemName, itemDesc, quantity }]
+    aggItems:       [],   // aggregated by itemId: [{ itemId, itemName, itemDesc, totalQty, lines }]
+    itemTotals:     {},   // { [itemId]: aggItem }
+    dropdowns:      null, // { packageTypes, weightUnits, dimUnits, defaultWuKey, defaultDuKey }
+    pallets:        [],   // [{ pid, pkgTypeId, length, width, height, weight, wuId, duId }]
+    palletItems:    {},   // { [pid]: { [itemId]: qty } }
+    nextPid:        1,
+};
+
+// ─── Screen helpers ───────────────────────────────────────────────────────────
+function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+}
+
+// ─── API helpers ──────────────────────────────────────────────────────────────
+async function apiGet(params) {
+    const qs  = Object.entries(params).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+    const res = await fetch(RESTLET_URL + '&' + qs, { method: 'GET' });
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error('HTTP ' + res.status + (txt ? ': ' + txt.slice(0, 300) : ''));
+    }
+    return res.json();
+}
+
+async function apiPost(body) {
+    const res = await fetch(RESTLET_URL, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error('HTTP ' + res.status + (txt ? ': ' + txt.slice(0, 300) : ''));
+    }
+    return res.json();
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+    showScreen('sc-orders');
+    loadPickedOrders();
+    document.getElementById('scan-input').focus();
+});
+
+// ─── SCREEN 1: Load picked orders ─────────────────────────────────────────────
+async function loadPickedOrders() {
+    try {
+        const data = await apiGet({ action: 'getPickedFulfillments' });
+        if (!data.success) throw new Error(data.error);
+
+        S.orders       = data.orders || [];
+        S.locationName = data.locationName || '';
+        document.getElementById('hdr-location').textContent = S.locationName;
+
+        // Sort: pre-selected order first
+        if (PRE_SELECT_IF_ID) {
+            S.orders.sort((a, b) => {
+                const aMatch = a.fulfillments.some(f => String(f.ifId) === String(PRE_SELECT_IF_ID));
+                const bMatch = b.fulfillments.some(f => String(f.ifId) === String(PRE_SELECT_IF_ID));
+                return (bMatch ? 1 : 0) - (aMatch ? 1 : 0);
+            });
+        }
+
+        document.getElementById('orders-loading').style.display = 'none';
+
+        if (!S.orders.length) {
+            document.getElementById('orders-empty').style.display = 'block';
+            return;
+        }
+
+        renderOrderList();
+
+        // Auto-select order containing the pre-selected IF
+        if (PRE_SELECT_IF_ID) {
+            const match = S.orders.find(o =>
+                o.fulfillments.some(f => String(f.ifId) === String(PRE_SELECT_IF_ID))
+            );
+            if (match) toggleOrderSel(match.toId, true);
+        }
+    } catch (e) {
+        document.getElementById('orders-loading').style.display = 'none';
+        const el = document.getElementById('orders-error');
+        el.textContent   = 'Error loading orders: ' + e.message;
+        el.style.display = 'block';
+    }
+}
+
+function renderOrderList() {
+    const list    = document.getElementById('order-list');
+    const filter  = document.getElementById('orders-filter-note');
+    list.innerHTML     = '';
+    list.style.display = 'flex';
+
+    const visible = S.activeDest
+        ? S.orders.filter(o => o.sourceId === S.activeSource && o.destId === S.activeDest)
+        : S.orders;
+
+    if (S.activeDest && filter) {
+        filter.textContent = 'Showing orders from \u201c' + S.activeSourceName +
+            '\u201d to \u201c' + S.activeDestName + '\u201d only. Deselect all to see all orders.';
+        filter.style.display = 'block';
+    } else if (filter) {
+        filter.style.display = 'none';
+    }
+
+    visible.forEach((to) => {
+        const card = document.createElement('div');
+        card.className      = 'order-card';
+        card.dataset.toId   = to.toId;
+
+        const ifNums = to.fulfillments.map(f => f.ifTranId).join(', ');
+        card.innerHTML =
+            '<div class="order-card-top">' +
+              '<input type="checkbox" class="order-cb" data-toid="' + esc(to.toId) + '">' +
+              '<span class="order-num">' + esc(to.toTranId) + '</span>' +
+              '<span class="order-dest">' + esc(to.sourceName || '') + ' &rarr; ' + esc(to.destName) + '</span>' +
+            '</div>' +
+            '<div class="order-ifs">IFs: ' + esc(ifNums) + '</div>';
+
+        const cb = card.querySelector('.order-cb');
+        cb.checked = S.selectedToIds.has(to.toId);
+        card.classList.toggle('selected', cb.checked);
+        cb.addEventListener('change', () => toggleOrderSel(to.toId, cb.checked));
+        card.addEventListener('click', (e) => {
+            if (e.target === cb) return;
+            cb.checked = !cb.checked;
+            toggleOrderSel(to.toId, cb.checked);
+        });
+
+        list.appendChild(card);
+    });
+    applyScanFilter();
+}
+
+function toggleOrderSel(toId, checked) {
+    const order = S.orders.find(o => o.toId === toId);
+    if (!order) return;
+
+    const wasEmpty = S.selectedToIds.size === 0;
+
+    if (checked) {
+        S.selectedToIds.add(toId);
+        // First selection — lock source+destination and re-render filtered list
+        if (wasEmpty) {
+            S.activeSource     = order.sourceId;
+            S.activeSourceName = order.sourceName;
+            S.activeDest       = order.destId;
+            S.activeDestName   = order.destName;
+            renderOrderList();
+        }
+    } else {
+        S.selectedToIds.delete(toId);
+        // Last deselection — clear source+destination filter and show all orders
+        if (S.selectedToIds.size === 0) {
+            S.activeSource     = null;
+            S.activeSourceName = '';
+            S.activeDest       = null;
+            S.activeDestName   = '';
+            renderOrderList();
+        }
+    }
+
+    // Sync checkbox + selected class on visible cards
+    document.querySelectorAll('.order-card').forEach((card) => {
+        const cb  = card.querySelector('.order-cb');
+        const sel = S.selectedToIds.has(card.dataset.toId);
+        if (cb) cb.checked = sel;
+        card.classList.toggle('selected', sel);
+    });
+
+    const count = S.selectedToIds.size;
+    document.getElementById('sel-count').textContent =
+        count ? count + ' order' + (count === 1 ? '' : 's') + ' selected' : '';
+    document.getElementById('btn-build-pack').disabled = count === 0;
+    document.getElementById('orders-msg').textContent  = '';
+}
+
+// ── Scan / search support ─────────────────────────────────────────────────────
+function applyScanFilter() {
+    const val = document.getElementById('scan-input').value.trim().toUpperCase();
+    document.querySelectorAll('#order-list .order-card').forEach((card) => {
+        const order = S.orders.find(o => o.toId === card.dataset.toId);
+        card.style.display = (!val || (order && order.toTranId.toUpperCase().includes(val))) ? '' : 'none';
+    });
+}
+
+document.getElementById('scan-input').addEventListener('input', applyScanFilter);
+
+document.getElementById('scan-input').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const val = e.target.value.trim();
+    const to  = S.orders.find(o => o.toTranId === val);
+    if (!to) {
+        document.getElementById('orders-msg').textContent =
+            '"' + val + '" not found or not in Picked status.';
+    } else {
+        const cb = document.querySelector('.order-cb[data-toid="' + to.toId + '"]');
+        if (cb) { cb.checked = !cb.checked; toggleOrderSel(to.toId, cb.checked); }
+    }
+    e.target.value = '';
+    applyScanFilter();
+});
+
+// ─── Navigate to Screen 2 ─────────────────────────────────────────────────────
+async function goToBuildPack() {
+    if (!S.selectedToIds.size) return;
+    showScreen('sc-builder');
+
+    // Collect fulfillment IDs from all selected orders
+    S.selectedIFIds = [];
+    S.orders
+        .filter(o => S.selectedToIds.has(o.toId))
+        .forEach(o => o.fulfillments.forEach(f => S.selectedIFIds.push(f.ifId)));
+
+    // Set builder title
+    const toNums = S.orders
+        .filter(o => S.selectedToIds.has(o.toId))
+        .map(o => o.toTranId)
+        .join(', ');
+    document.getElementById('builder-title').textContent = 'Pack Orders — ' + toNums;
+
+    try {
+        const [itemsData, ddData] = await Promise.all([
+            apiGet({ action: 'getFulfillmentItems', ifIds: S.selectedIFIds.join(',') }),
+            apiGet({ action: 'getDropdownData', ifIds: S.selectedIFIds.join(',') }),
+        ]);
+
+        if (!itemsData.success) throw new Error(itemsData.error);
+        if (!ddData.success)    throw new Error(ddData.error);
+
+        S.items     = itemsData.items || [];
+
+        // Aggregate by itemId: sum quantities across all lines and IFs for display
+        S.itemTotals = {};
+        S.items.forEach((item) => {
+            if (!S.itemTotals[item.itemId]) {
+                S.itemTotals[item.itemId] = {
+                    itemId:   item.itemId,
+                    itemName: item.itemName,
+                    itemDesc: item.itemDesc,
+                    totalQty: 0,
+                    lines:    [],
+                };
+            }
+            S.itemTotals[item.itemId].totalQty += item.quantity;
+            S.itemTotals[item.itemId].lines.push(item);
+        });
+        S.aggItems = Object.values(S.itemTotals);
+
+        S.dropdowns   = ddData;
+        S.pallets     = [];
+        S.palletItems = {};
+        S.nextPid     = 1;
+
+        if (!S.aggItems.length) {
+            document.getElementById('builder-loading-wrap').innerHTML =
+                '<div class="alert alert-warn" style="margin:16px">' +
+                'No items found for the selected fulfillments.</div>';
+            return;
+        }
+
+        renderBuilderUI();
+    } catch (e) {
+        document.getElementById('builder-loading-wrap').innerHTML =
+            '<div class="alert alert-error" style="margin:16px">Error: ' + esc(e.message) + '</div>';
+    }
+}
+
+function backToOrders() {
+    showScreen('sc-orders');
+}
+
+// ─── Utils ────────────────────────────────────────────────────────────────────
+function esc(v) {
+    return String(v == null ? '' : v)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ─── SCREEN 2: Builder UI ─────────────────────────────────────────────────────
+function renderBuilderUI() {
+    const wrap = document.getElementById('builder-loading-wrap');
+    wrap.style.overflow = 'hidden';
+    wrap.style.padding  = '10px';
+
+    wrap.innerHTML =
+        '<div class="builder-layout" style="height:100%">' +
+          '<div class="item-panel">' +
+            '<div class="panel-hdr">Items to Pack</div>' +
+            '<div class="item-scroll" id="item-progress-list"></div>' +
+          '</div>' +
+          '<div class="pallet-panel">' +
+            '<div class="pallet-toolbar">' +
+              '<span class="pallet-toolbar-title">Packages</span>' +
+              '<button class="btn btn-success btn-sm" onclick="addPallet()">+ Add Package</button>' +
+            '</div>' +
+            '<div class="pallet-scroll" id="pallet-list"></div>' +
+            '<div class="notes-row" style="margin-top:10px">' +
+              '<label>Notes</label>' +
+              '<textarea id="pack-notes" placeholder="Optional packing notes\u2026"></textarea>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+
+    renderItemProgress();
+    addPallet();
+}
+
+// ─── Item key: itemId used as the pallet-assignment key ───────────────────────
+function ikey(item) {
+    return item.itemId;
+}
+
+// ─── Item Progress Panel ──────────────────────────────────────────────────────
+function renderItemProgress() {
+    const list = document.getElementById('item-progress-list');
+    if (!list) return;
+
+    const assigned = computeItemAssignments();
+
+    list.innerHTML = S.aggItems.map((item) => {
+        const k        = ikey(item);
+        const total    = item.totalQty;
+        const done     = assigned[k] || 0;
+        const remain   = total - done;
+        const pct      = Math.min(100, total > 0 ? Math.round(done / total * 100) : 0);
+        const over     = done > total;
+        const complete = done === total && !over;
+
+        const barClass = over ? 'over' : (complete ? 'complete' : '');
+        const remClass = complete ? 'ok' : (over ? 'bad' : '');
+        const remText  = complete
+            ? '\u2713 All assigned'
+            : (over ? '\u26a0 Over by ' + (done - total) : remain + ' remaining');
+
+        return '<div class="item-row">' +
+            '<div class="item-row-top">' +
+              '<span class="item-name">' + esc(item.itemName || item.itemId) + '</span>' +
+              '<span class="item-qty-info">' + done + ' / ' + total + '</span>' +
+            '</div>' +
+            '<div class="item-bar-wrap">' +
+              '<div class="item-bar ' + barClass + '" style="width:' + pct + '%"></div>' +
+            '</div>' +
+            '<div class="item-remaining ' + remClass + '">' + remText + '</div>' +
+        '</div>';
+    }).join('');
+}
+
+// ─── Compute total qty assigned to each item across all pallets ───────────────
+function computeItemAssignments() {
+    const totals = {};
+    S.pallets.forEach(({ pid }) => {
+        const piMap = S.palletItems[pid] || {};
+        Object.entries(piMap).forEach(([k, qty]) => {
+            totals[k] = (totals[k] || 0) + (parseFloat(qty) || 0);
+        });
+    });
+    return totals;
+}
+
+// ─── Validate: all items assigned, no empty pallets, dims/weight required ─────
+function validateAndToggleSubmit() {
+    const assigned = computeItemAssignments();
+    const allItemsDone = S.aggItems.every(item => (assigned[ikey(item)] || 0) === item.totalQty);
+
+    const missingPkgType = S.pallets.filter(p => !p.pkgTypeId);
+
+    const emptyPallets = S.pallets.filter(p => {
+        const piMap = S.palletItems[p.pid] || {};
+        return !Object.values(piMap).some(qty => (parseFloat(qty) || 0) > 0);
+    });
+
+    const missingDimPallets = S.pallets.filter(p =>
+        !(parseFloat(p.length) > 0) || !(parseFloat(p.width) > 0) ||
+        !(parseFloat(p.height) > 0) || !(parseFloat(p.weight) > 0)
+    );
+
+    const btn = document.getElementById('btn-submit-pack');
+    const msg = document.getElementById('builder-msg');
+
+    const valid = S.pallets.length > 0 && allItemsDone &&
+                  missingPkgType.length === 0 && emptyPallets.length === 0 && missingDimPallets.length === 0;
+    btn.disabled = !valid;
+
+    if (!S.pallets.length) {
+        msg.textContent = 'Add at least one package.';
+    } else if (missingPkgType.length > 0) {
+        const n = missingPkgType.length;
+        msg.textContent = n + ' package' + (n === 1 ? ' is' : 's are') + ' missing a Package Type.';
+    } else if (emptyPallets.length > 0) {
+        const n = emptyPallets.length;
+        msg.textContent = n + ' package' + (n === 1 ? ' has' : 's have') + ' no items assigned.';
+    } else if (missingDimPallets.length > 0) {
+        msg.textContent = 'All packages require Length, Width, Height, and Weight.';
+    } else if (!allItemsDone) {
+        const n = S.aggItems.filter(item => (assigned[ikey(item)] || 0) !== item.totalQty).length;
+        msg.textContent = n + ' item' + (n === 1 ? '' : 's') +
+            ' not fully assigned. Assign 100% of quantities to enable submit.';
+    } else {
+        msg.textContent = '';
+    }
+}
+
+// ─── Add a new pallet ─────────────────────────────────────────────────────────
+function addPallet() {
+    const pid  = S.nextPid++;
+    const dd   = S.dropdowns || {};
+
+    // Inherit the last pallet's package type; blank on first pallet
+    const prev       = S.pallets.length > 0 ? S.pallets[S.pallets.length - 1] : null;
+    const prevPkgId  = prev ? prev.pkgTypeId : '';
+    const prevPt     = prevPkgId ? (dd.packageTypes || []).find(x => x.key === prevPkgId) : null;
+
+    S.pallets.push({
+        pid,
+        pkgTypeId: prevPkgId,
+        length:    prevPt ? (prevPt.length || '') : '',
+        width:     prevPt ? (prevPt.width  || '') : '',
+        height:    prevPt ? (prevPt.height || '') : '',
+        weight:    '',
+        wuId:      dd.defaultWuKey || '',
+        duId:      dd.defaultDuKey || '',
+    });
+
+    S.palletItems[pid] = {};
+
+    renderPalletList();
+    validateAndToggleSubmit();
+
+    setTimeout(() => {
+        const list = document.getElementById('pallet-list');
+        if (list) list.scrollTop = list.scrollHeight;
+    }, 50);
+}
+
+// ─── Render all pallet cards ──────────────────────────────────────────────────
+function renderPalletList() {
+    const list = document.getElementById('pallet-list');
+    if (!list) return;
+    list.innerHTML = '';
+    S.pallets.forEach(p => {
+        const card = document.createElement('div');
+        card.className   = 'pallet-card';
+        card.dataset.pid = p.pid;
+        card.innerHTML   = buildPalletCardHTML(p);
+        list.appendChild(card);
+    });
+}
+
+function buildPalletCardHTML(p) {
+    const dd  = S.dropdowns || {};
+    const idx = S.pallets.findIndex(x => x.pid === p.pid);
+
+    const pkgOpts = '<option value="">— Select type —</option>' +
+        (dd.packageTypes || []).map(pt =>
+            '<option value="' + esc(pt.key) + '"' + (pt.key === p.pkgTypeId ? ' selected' : '') + '>' +
+            esc(pt.label) + '</option>'
+        ).join('');
+
+    const wuOpts = (dd.weightUnits || []).map(u =>
+        '<option value="' + esc(u.key) + '"' + (u.key === p.wuId ? ' selected' : '') + '>' +
+        esc(u.label) + '</option>'
+    ).join('');
+
+    const duOpts = (dd.dimUnits || []).map(u =>
+        '<option value="' + esc(u.key) + '"' + (u.key === p.duId ? ' selected' : '') + '>' +
+        esc(u.label) + '</option>'
+    ).join('');
+
+    const piMap    = S.palletItems[p.pid] || {};
+    const assigned = computeItemAssignments();
+
+    const itemRows = S.aggItems.map((item) => {
+        const k     = ikey(item);
+        const qty   = piMap[k] != null ? piMap[k] : '';
+        const total = item.totalQty;
+        const done  = assigned[k] || 0;
+        const myQty = parseFloat(qty) || 0;
+        const avail = Math.max(0, total - (done - myQty));
+        const over  = myQty > avail;
+
+        return '<div class="pallet-item-row">' +
+            '<span class="pallet-item-name">' + esc(item.itemName || item.itemId) + '</span>' +
+            '<button class="btn btn-secondary btn-sm" ' +
+                    'data-pid="' + p.pid + '" data-ikey="' + esc(k) + '" ' +
+                    'onclick="addItemToPallet(this.dataset.pid,this.dataset.ikey)" ' +
+                    'title="Fill remaining quantity">All</button>' +
+            '<span class="pallet-item-max">max&nbsp;' + avail + '</span>' +
+            '<input type="number" min="0" max="' + total + '" step="1" ' +
+                   'class="pallet-item-qty' + (over ? ' over' : '') + '" ' +
+                   'value="' + esc(String(qty)) + '" ' +
+                   'data-pid="' + p.pid + '" data-ikey="' + esc(k) + '" ' +
+                   'oninput="onQtyChange(' + p.pid + ',this.dataset.ikey)" ' +
+                   'onchange="onQtyChange(' + p.pid + ',this.dataset.ikey)">' +
+        '</div>';
+    }).join('');
+
+    const duLabel = getDuLabel(p.duId);
+
+    return '<div class="pallet-card-hdr">' +
+        '<span class="pallet-num">Package ' + (idx + 1) + '</span>' +
+        (S.pallets.length > 1
+            ? '<button class="btn btn-danger btn-sm" onclick="removePallet(' + p.pid + ')">Remove</button>'
+            : '') +
+    '</div>' +
+    '<div class="pallet-body">' +
+        '<div class="pallet-dims">' +
+            '<div class="pallet-field"><label>Package Type&thinsp;<span class="req-star">*</span></label>' +
+                '<select class="wide' + (!p.pkgTypeId ? ' req-missing' : '') + '" onchange="onPkgTypeChange(' + p.pid + ',this.value)">' +
+                pkgOpts + '</select></div>' +
+            '<div class="pallet-field"><label>L&thinsp;<span class="req-star">*</span></label>' +
+                '<input type="number" min="0" step="0.01" value="' + esc(p.length) + '" ' +
+                       'class="' + (!(parseFloat(p.length) > 0) ? 'req-missing' : '') + '" ' +
+                       'data-field="length" oninput="onDimChange(' + p.pid + ',this.dataset.field,this.value)"></div>' +
+            '<div class="pallet-field"><label>W&thinsp;<span class="req-star">*</span></label>' +
+                '<input type="number" min="0" step="0.01" value="' + esc(p.width) + '" ' +
+                       'class="' + (!(parseFloat(p.width) > 0) ? 'req-missing' : '') + '" ' +
+                       'data-field="width" oninput="onDimChange(' + p.pid + ',this.dataset.field,this.value)"></div>' +
+            '<div class="pallet-field"><label>H&thinsp;<span class="req-star">*</span></label>' +
+                '<input type="number" min="0" step="0.01" value="' + esc(p.height) + '" ' +
+                       'class="' + (!(parseFloat(p.height) > 0) ? 'req-missing' : '') + '" ' +
+                       'data-field="height" oninput="onDimChange(' + p.pid + ',this.dataset.field,this.value)"></div>' +
+            '<div class="pallet-field"><label>Dim&nbsp;Unit</label>' +
+                '<select onchange="onDimUnitChange(' + p.pid + ',this.value)">' +
+                duOpts + '</select></div>' +
+            '<div class="pallet-field"><label>Weight&thinsp;<span class="req-star">*</span></label>' +
+                '<input type="number" min="0" step="0.01" value="' + esc(p.weight) + '" ' +
+                       'class="' + (!(parseFloat(p.weight) > 0) ? 'req-missing' : '') + '" ' +
+                       'data-field="weight" oninput="onDimChange(' + p.pid + ',this.dataset.field,this.value)"></div>' +
+            '<div class="pallet-field"><label>Wt&nbsp;Unit</label>' +
+                '<select onchange="onWtUnitChange(' + p.pid + ',this.value)">' +
+                wuOpts + '</select></div>' +
+        '</div>' +
+        '<div class="pallet-items-hdr" style="margin-top:8px">Item Quantities</div>' +
+        itemRows +
+    '</div>';
+}
+
+// ─── Pallet field change handlers ─────────────────────────────────────────────
+function addItemToPallet(pid, k) {
+    const assigned = computeItemAssignments();
+    const piMap    = S.palletItems[pid] || {};
+    const item     = S.aggItems.find(it => ikey(it) === k);
+    if (!item) return;
+    const myQty    = parseFloat(piMap[k]) || 0;
+    piMap[k]       = Math.max(0, item.totalQty - ((assigned[k] || 0) - myQty));
+    S.palletItems[pid] = piMap;
+    renderPalletList();
+    renderItemProgress();
+    validateAndToggleSubmit();
+}
+
+function removePallet(pid) {
+    S.pallets    = S.pallets.filter(p => p.pid !== pid);
+    delete S.palletItems[pid];
+    renderPalletList();
+    renderItemProgress();
+    validateAndToggleSubmit();
+}
+
+function onPkgTypeChange(pid, pkgTypeId) {
+    const p = S.pallets.find(x => x.pid === pid);
+    if (!p) return;
+    p.pkgTypeId = pkgTypeId;
+    const pt = (S.dropdowns.packageTypes || []).find(x => x.key === pkgTypeId);
+    if (pt) { p.length = pt.length || ''; p.width = pt.width || ''; p.height = pt.height || ''; }
+    const card = document.querySelector('.pallet-card[data-pid="' + pid + '"]');
+    if (card) card.innerHTML = buildPalletCardHTML(p);
+    validateAndToggleSubmit();
+}
+
+function onDimChange(pid, field, value) {
+    const p = S.pallets.find(x => x.pid === pid);
+    if (!p) return;
+    p[field] = value;
+    // Update red-border indicator on this input in real time
+    const card = document.querySelector('.pallet-card[data-pid="' + pid + '"]');
+    if (card) {
+        const inp = card.querySelector('input[data-field="' + field + '"]');
+        if (inp) inp.classList.toggle('req-missing', !(parseFloat(value) > 0));
+    }
+    validateAndToggleSubmit();
+}
+
+function onDimUnitChange(pid, duId) {
+    const p = S.pallets.find(x => x.pid === pid);
+    if (!p) return;
+    p.duId = duId;
+    const card = document.querySelector('.pallet-card[data-pid="' + pid + '"]');
+    if (card) card.innerHTML = buildPalletCardHTML(p);
+}
+
+function onWtUnitChange(pid, wuId) {
+    const p = S.pallets.find(x => x.pid === pid);
+    if (p) p.wuId = wuId;
+}
+
+function onQtyChange(pid, k) {
+    const input = document.querySelector(
+        'input.pallet-item-qty[data-pid="' + pid + '"][data-ikey="' + CSS.escape(k) + '"]'
+    );
+    if (!input) return;
+
+    const val = parseFloat(input.value) || 0;
+    if (!S.palletItems[pid]) S.palletItems[pid] = {};
+    S.palletItems[pid][k] = val;
+
+    renderItemProgress();
+    validateAndToggleSubmit();
+
+    // Refresh "max" hints for all inputs sharing this ikey
+    const assigned = computeItemAssignments();
+    document.querySelectorAll('input.pallet-item-qty[data-ikey="' + CSS.escape(k) + '"]').forEach((inp) => {
+        const rowPid = parseInt(inp.dataset.pid, 10);
+        const item   = S.aggItems.find(it => ikey(it) === k);
+        if (!item) return;
+        const myQty  = parseFloat(inp.value) || 0;
+        const total  = item.totalQty;
+        const done   = assigned[k] || 0;
+        const avail  = Math.max(0, total - (done - myQty));
+        const maxEl  = inp.closest('.pallet-item-row') && inp.closest('.pallet-item-row').querySelector('.pallet-item-max');
+        if (maxEl) maxEl.textContent = 'max\u00a0' + avail;
+        inp.classList.toggle('over', myQty > avail);
+    });
+}
+
+// ─── Helper: dim unit label ────────────────────────────────────────────────────
+function getDuLabel(duId) {
+    const dd = S.dropdowns;
+    if (!dd) return '';
+    const u = (dd.dimUnits || []).find(x => x.key === duId);
+    return u ? u.label : '';
+}
+
+// ─── Submit Packing ───────────────────────────────────────────────────────────
+document.getElementById('btn-submit-pack').addEventListener('click', submitPacking);
+
+async function submitPacking() {
+    const btn = document.getElementById('btn-submit-pack');
+    const msg = document.getElementById('builder-msg');
+
+    // Final validation (mirrors validateAndToggleSubmit)
+    const assigned        = computeItemAssignments();
+    const allDone         = S.aggItems.every(item => (assigned[ikey(item)] || 0) === item.totalQty);
+    const hasEmptyPallet  = S.pallets.some(p => !Object.values(S.palletItems[p.pid] || {}).some(q => (parseFloat(q) || 0) > 0));
+    const hasMissingDims  = S.pallets.some(p => !(parseFloat(p.length) > 0) || !(parseFloat(p.width) > 0) || !(parseFloat(p.height) > 0) || !(parseFloat(p.weight) > 0));
+    if (!allDone || !S.pallets.length || hasEmptyPallet || hasMissingDims) return;
+
+    btn.disabled    = true;
+    btn.textContent = 'Submitting\u2026';
+    msg.textContent = '';
+
+    // Build fulfillments list
+    const fulfillments = [];
+    S.orders
+        .filter(o => S.selectedToIds.has(o.toId))
+        .forEach((o) => {
+            o.fulfillments.forEach((f) => {
+                fulfillments.push({ ifId: f.ifId, ifTranId: f.ifTranId, toId: o.toId, toTranId: o.toTranId, sourceId: o.sourceId, destId: o.destId });
+            });
+        });
+
+    // Pre-compute item→IF-line distribution across all pallets.
+    // Line state (lineIdx, lineConsumed) carries forward across pallets so each
+    // original IF line's quantity is consumed exactly once in order, regardless
+    // of how the user has split quantities across packages.
+    const lineState = {};  // { [itemId]: { lineIdx, lineConsumed } }
+    S.aggItems.forEach((agg) => {
+        lineState[agg.itemId] = { lineIdx: 0, lineConsumed: 0 };
+    });
+
+    const distributedItemsByPallet = S.pallets.map((p) => {
+        const piMap = S.palletItems[p.pid] || {};
+        const items = [];
+        S.aggItems.forEach((agg) => {
+            const assignedQty = parseFloat(piMap[agg.itemId]) || 0;
+            if (!assignedQty) return;
+            let palletRemaining = assignedQty;
+            const st = lineState[agg.itemId];
+            while (palletRemaining > 0 && st.lineIdx < agg.lines.length) {
+                const line        = agg.lines[st.lineIdx];
+                const lineAvail   = line.quantity - st.lineConsumed;
+                const take        = Math.min(palletRemaining, lineAvail);
+                if (take > 0) {
+                    items.push({ itemId: agg.itemId, quantity: take, ifId: line.ifId, lineNum: line.lineNum });
+                    palletRemaining   -= take;
+                    st.lineConsumed   += take;
+                }
+                if (st.lineConsumed >= line.quantity) { st.lineIdx++; st.lineConsumed = 0; }
+            }
+        });
+        return items;
+    });
+
+    // Build pallets payload — read current input values from DOM
+    const palletsPayload = S.pallets.map((p, pi) => {
+        const card   = document.querySelector('.pallet-card[data-pid="' + p.pid + '"]');
+
+        // Read dim/weight inputs from card to capture any unsaved keystrokes
+        const getVal = (sel) => {
+            if (!card) return '';
+            const el = card.querySelector(sel);
+            return el ? el.value : '';
+        };
+
+        return {
+            pkgTypeId: p.pkgTypeId,
+            length:    getVal('input[data-field="length"]') || p.length,
+            width:     getVal('input[data-field="width"]')  || p.width,
+            height:    getVal('input[data-field="height"]') || p.height,
+            weight:    getVal('input[data-field="weight"]') || p.weight,
+            wuId:      p.wuId,
+            duId:      p.duId,
+            items:     distributedItemsByPallet[pi],
+        };
+    });
+
+    const notes = (document.getElementById('pack-notes') || {}).value || '';
+
+    try {
+        const data = await apiPost({
+            action:       'submitPacking',
+            fulfillments,
+            pallets:      palletsPayload,
+            notes,
+        });
+
+        if (!data.success) throw new Error(data.error);
+
+        // Replace builder body with success message
+        const wrap = document.getElementById('builder-loading-wrap');
+        wrap.style.overflow = '';
+        wrap.innerHTML =
+            '<div class="alert alert-ok" style="margin:16px">' +
+            '\u2713 Packing complete! Created <strong>' + data.shipUnitCount + '</strong> pallet' +
+            (data.shipUnitCount === 1 ? '' : 's') + ' and <strong>' + data.shipUnitItemCount +
+            '</strong> item assignment' + (data.shipUnitItemCount === 1 ? '' : 's') + '.' +
+            '<br><br>Shipment Summary ID: <strong>' + esc(data.summaryId) + '</strong>' +
+            '</div>';
+
+        const closeBtn = document.getElementById('btn-close-window');
+        closeBtn.style.display = 'inline-block'; // Show dedicated Close button
+
+        // Notify the opener (Item Fulfillment page) to reload
+        window.opener && window.opener.postMessage({ type: 'PACKING_COMPLETE' }, '*');
+
+        //Hide the Submit Button
+        const submitBtn = document.getElementById('btn-submit-pack');
+        if (submitBtn) submitBtn.style.display = 'none';
+
+        // Update footer — Done closes the window
+        btn.class       = "btn btn-secondary btn-sm";
+        btn.textContent = 'Done';
+        btn.disabled    = true;
+        btn.type        = 'button';
+        btn.onclick     = () => window.close();
+        msg.textContent = '';
+
+        // Offer to close the popup after a short delay
+        setTimeout(() => {
+            const wrap2 = document.getElementById('builder-loading-wrap');
+            if (wrap2) {
+                wrap2.innerHTML +=
+                    '<div style="margin:0 16px">' +
+                    '<button class="btn btn-secondary btn-sm" onclick="window.close()">Close Window</button>' +
+                    '</div>';
+            }
+        }, 600);
+
+    } catch (e) {
+        msg.textContent = 'Submit error: ' + e.message;
+        btn.disabled    = false;
+        btn.textContent = 'Submit Packing';
+    }
+}
+</script>
+</body>
+</html>`;
+
+    return { onRequest };
+});
