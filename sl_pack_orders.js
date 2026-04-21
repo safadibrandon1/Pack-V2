@@ -188,7 +188,7 @@ define([
      ═══════════════════════════════════════════════════════════════════════════ -->
 <div class="screen active" id="sc-orders">
   <header>
-    <h1>Pack Orders</h1>
+    <h1>Pack Orders <span style="font-size:10px;opacity:.5;font-weight:normal">v2</span></h1>
     <span class="loc" id="hdr-location">Loading…</span>
   </header>
 
