@@ -381,5 +381,31 @@ All scripts log to **System > Monitoring > Script Execution Logs**.
 
 Change log level to `Error` in production deployments to reduce noise.
 
+---
 
+## Changelog
 
+### 2026-04-21 — Pack Orders SPA rewrite & bug fixes
+
+**Files changed:** `sl_pack_orders.js`, `rl_pack_orders.js`
+
+#### sl_pack_orders.js
+
+| # | Fix | Detail |
+|---|-----|--------|
+| 1 | **Blank page on open** | Added `active` CSS class to the `sc-orders` div in the HTML so Screen 1 is visible immediately. Without it the SPA rendered with all screens hidden. |
+| 2 | **initPage guard** | Replaced plain `DOMContentLoaded` listener with an `_inited` flag + `document.readyState` check so `initPage()` fires exactly once regardless of when the script executes relative to DOM parsing. |
+| 3 | **Spinner never resolving** | Added `finally` block to `loadPickedOrders` so the loading spinner is always hidden whether the fetch succeeds or throws. |
+| 4 | **SyntaxError blocking all JS** | Template literal used `\'` to escape single quotes inside inline `onclick` attributes (e.g. `onAddFormField(\'length\',this.value)`). Inside a JS template literal `\'` is consumed as an escape, so the browser received unescaped `'` characters that terminated the string literals and caused `Uncaught SyntaxError: Unexpected identifier 'length'`. Fixed by escaping as `\\'` (14 occurrences) so the template literal outputs `\'` into the HTML. |
+| 5 | **No scrollbar in builder** | `renderBuilderUI` was setting `wrap.style.overflow = 'hidden'`, overriding the `.body` CSS class's `overflow-y: auto`. Changed to `wrap.style.overflowY = 'auto'` so the package list scrolls correctly when many packages are added. |
+| 6 | **Weight unit not updating on package type change** | `onPkgTypeChange` and `onAddFormPkgType` updated the dim unit when a package type was selected but did not update the weight unit. Added `syncWuFromDu` helper (CM → KG, IN → LB) and wired it into both handlers so both units stay in sync. |
+
+#### rl_pack_orders.js
+
+| # | Fix | Detail |
+|---|-----|--------|
+| 1 | **Full RESTlet rewrite deployed** | Prior version had been committed under the wrong filename (no `.js` extension) so NetSuite was ignoring it. Rewrote and deployed to the correct `rl_pack_orders.js` path. |
+| 2 | **Location country field handling** | `getLocationInfo` previously assumed `search.lookupFields` always returns `country` as an array. It can also be returned as a plain string. Now handles both cases. Added a `Debug` log entry so the resolved country code and `isUS` flag are visible in execution logs. |
+| 3 | **Case-insensitive unit name matching** | `getDropdownData` matched list value names with strict equality (`=== 'LB'`, `=== 'IN'`, etc.). Changed to `.toUpperCase()` comparison so names like `lb`, `Lb`, `in`, `cm`, `kg` all match correctly. Added a `Debug` log showing the resolved `defaultWuKey` and `defaultDuKey`. |
+| 4 | **Volume stored as raw cubic units instead of converted units** | `submitPacking` calculated volume as raw L × W × H and stored it directly. Volume is now properly converted before storage: IN³ ÷ 1,728 = cubic feet (CU F); CM³ ÷ 1,000,000 = cubic metres (CU M). Conversion is applied to both the per-package Ship Unit volume and the aggregate Shipment Summary volume. |
+| 5 | **CU M volume unit not being set for metric packages** | `submitPacking` looked up volume units with strict name equality (`=== 'CU M'`). If the list value name had different casing or whitespace this silently fell back to CU F for all packages. Fixed with case-insensitive + whitespace-normalised matching. Added a `Debug` log that lists all available volume unit names so mismatches can be diagnosed immediately. |
