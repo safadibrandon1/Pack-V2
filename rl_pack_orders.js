@@ -40,6 +40,7 @@ define([
     };
 
     const getCached = (key, loaderFn) => {
+        // Read from cache; only trust non-empty arrays (empty could be a stale error result)
         let raw = null;
         try { raw = getPackCache().get({ key }); } catch (e) { /* ignore */ }
         if (raw) {
@@ -49,6 +50,7 @@ define([
             } catch (e) { /* fall through */ }
         }
         const result = loaderFn();
+        // Only cache non-empty arrays so transient failures don't poison the cache
         if (!Array.isArray(result) || result.length > 0) {
             try { getPackCache().put({ key, value: JSON.stringify(result), ttl: CACHE_TTL }); } catch (e) { /* ignore */ }
         }
@@ -61,8 +63,8 @@ define([
         let result;
         try {
             switch (params.action) {
-                case 'getPickedFulfillments': result = getPickedFulfillments();         break;
-                case 'getDropdownData':       result = getDropdownData(params.ifIds); break;
+                case 'getPickedFulfillments': result = getPickedFulfillments();          break;
+                case 'getDropdownData':       result = getDropdownData(params.ifIds);    break;
                 default: result = { success: false, error: 'Unknown GET action: ' + params.action };
             }
         } catch (e) {
@@ -85,14 +87,10 @@ define([
     };
 
     // ─── getPickedFulfillments ────────────────────────────────────────────────
-    // Returns all Transfer Order IFs in "Picked" status at the user's location,
+    // Returns all Transfer Order IFs in "Picked" status,
     // grouped by Transfer Order for the selection UI.
 
     const getPickedFulfillments = () => {
-        const user       = runtime.getCurrentUser();
-        const locationId = user.location;
-        const locInfo    = locationId ? getLocationInfo(locationId) : { name: '' };
-
         const ifRows = [];
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - 90);
@@ -101,9 +99,9 @@ define([
         search.create({
             type: 'itemfulfillment',
             filters: [
-                ['mainline',  'is',        'T'],
+                ['mainline',  'is',          'T'],
                 'AND',
-                ['trandate',  'onOrAfter', cutoffStr],
+                ['trandate',  'onOrAfter',   cutoffStr],
             ],
             columns: [
                 search.createColumn({ name: 'internalid' }),
@@ -142,14 +140,15 @@ define([
                     fulfillments: [],
                 };
             }
-            toMap[row.toId].fulfillments.push({ ifId: row.ifId, ifTranId: row.ifTranId });
+            toMap[row.toId].fulfillments.push({
+                ifId:     row.ifId,
+                ifTranId: row.ifTranId,
+            });
         });
 
         return {
-            success:      true,
-            locationId,
-            locationName: locInfo.name,
-            orders:       Object.values(toMap),
+            success: true,
+            orders:  Object.values(toMap),
         };
     };
 
@@ -160,15 +159,20 @@ define([
     const getDropdownData = (ifIdsParam) => {
         const packageTypes = getCached('packageTypes', fetchPackageTypes);
         const weightUnits  = getCached('weightUnits',  () => fetchListValues(LISTS.WEIGHT_UNIT));
-        const dimUnits     = getCached('dimUnits',     () => fetchListValues(LISTS.DIM_UNIT));
+        const dimUnits     = getCached('dimUnits',      () => fetchListValues(LISTS.DIM_UNIT));
 
         // Resolve location from IF, fall back to user's default location
         let locationId = null;
         if (ifIdsParam) {
             try {
                 const firstIfId = String(ifIdsParam).split(',')[0].trim();
-                const ifFields  = search.lookupFields({ type: 'itemfulfillment', id: firstIfId, columns: ['location'] });
-                locationId = ifFields.location && ifFields.location[0] ? ifFields.location[0].value : null;
+                const ifFields  = search.lookupFields({
+                    type:    'itemfulfillment',
+                    id:      firstIfId,
+                    columns: ['location'],
+                });
+                locationId = ifFields.location && ifFields.location[0]
+                    ? ifFields.location[0].value : null;
             } catch (e) {
                 log.error({ title: 'getDropdownData IF location lookup', details: e });
             }
@@ -205,7 +209,7 @@ define([
     // ─── submitPacking ────────────────────────────────────────────────────────
     // Creates all records synchronously:
     //   1. Shipment Summary (with aggregate weight and volume)
-    //   2. Ship Unit records (one per pallet, each with volume)
+    //   2. Ship Unit records (one per pallet, each with individual volume)
     //   3. Updates Item Fulfillments to "Packed" status
     //
     // Expected body:
@@ -241,19 +245,25 @@ define([
         const locationId = (fulfillments[0] && fulfillments[0].sourceId) ? fulfillments[0].sourceId : user.location;
         const destId     = fulfillments[0] && fulfillments[0].destId ? parseInt(fulfillments[0].destId, 10) : null;
 
-        // ── 1. Resolve dim unit labels for volume unit determination ──────────
+        // ── 1. Resolve volume unit IDs based on dim unit labels ───────────────
         const dimUnitsData = getCached('dimUnits', () => fetchListValues(LISTS.DIM_UNIT));
         const duMap = {};
         dimUnitsData.forEach(u => { duMap[String(u.id)] = u.name; });
 
-        const volumeUnits = getCached('volumeUnits', () => fetchListValues(LISTS.VOLUME_UNIT));
-        const volUnitCuM  = volumeUnits.find(u => u.name === 'CU M');
-        const volUnitCuF  = volumeUnits.find(u => u.name === 'CU F');
+        let volUnitCuM = null;
+        let volUnitCuF = null;
+        try {
+            const volumeUnits = getCached('volumeUnits', () => fetchListValues(LISTS.VOLUME_UNIT));
+            volUnitCuM = volumeUnits.find(u => u.name === 'CU M') || null;
+            volUnitCuF = volumeUnits.find(u => u.name === 'CU F') || null;
+        } catch (e) {
+            log.error({ title: 'submitPacking: volume unit lookup', details: e });
+        }
 
         const getVolUnitId = (duId) => {
-            const duName = duMap[String(duId)] || '';
+            const duName   = duMap[String(duId)] || '';
             const isMetric = duName.toUpperCase() === 'CM';
-            const match = isMetric ? volUnitCuM : volUnitCuF;
+            const match    = isMetric ? volUnitCuM : volUnitCuF;
             return match ? String(match.id) : null;
         };
 
@@ -267,7 +277,7 @@ define([
             totalWeight += (parseFloat(p.weight) || 0);
             const vol = (parseFloat(p.length) || 0) * (parseFloat(p.width) || 0) * (parseFloat(p.height) || 0);
             totalVolume += vol;
-            if (!sessionWuId && p.wuId)    sessionWuId    = p.wuId;
+            if (!sessionWuId    && p.wuId) sessionWuId    = p.wuId;
             if (!sessionVolUnit && p.duId) sessionVolUnit = getVolUnitId(p.duId);
         });
 
@@ -285,7 +295,7 @@ define([
             const H   = parseFloat(p.height)  || 0;
             const wt  = parseFloat(p.weight)  || 0;
             const unit = p.wuId ? (wuMap[String(p.wuId)] || '').toLowerCase() : '';
-            return `${typeName} #${i + 1}: ${L} x ${W} x ${H} - ${wt}${unit ? ' ' + unit : ''} //`;
+            return typeName + ' #' + (i + 1) + ': ' + L + ' x ' + W + ' x ' + H + ' - ' + wt + (unit ? ' ' + unit : '') + ' //';
         }).join('');
 
         // ── 4. Resolve inventory status from first available fulfillment line ──
@@ -293,12 +303,12 @@ define([
         try {
             const firstIfRec = record.load({ type: 'itemfulfillment', id: allIfIds[0] });
             const lineCount  = firstIfRec.getLineCount({ sublistId: 'item' });
-            outer: for (let i = 0; i < lineCount; i++) {
+            outer: for (var i = 0; i < lineCount; i++) {
                 try {
                     const invDetail = firstIfRec.getSublistSubrecord({ sublistId: 'item', fieldId: 'inventorydetail', line: i });
                     if (!invDetail) continue;
                     const assignCount = invDetail.getLineCount({ sublistId: 'inventoryassignment' });
-                    for (let j = 0; j < assignCount; j++) {
+                    for (var j = 0; j < assignCount; j++) {
                         const status = invDetail.getSublistValue({ sublistId: 'inventoryassignment', fieldId: 'inventorystatus', line: j });
                         if (status) { inventoryStatusId = parseInt(status, 10); break outer; }
                     }
@@ -312,7 +322,10 @@ define([
         const ifNums      = [...new Set(fulfillments.map(f => f.ifTranId))].filter(Boolean);
         const summaryName = ifNums.length ? ifNums.join('-') : new Date().toISOString().slice(0, 10);
 
-        log.audit({ title: 'Creating Shipment Summary', details: 'Processing fulfillments: ' + ifNums.join(', ') });
+        log.audit({
+            title:   'Creating Shipment Summary',
+            details: 'Processing fulfillments: ' + fulfillments.map(f => f.ifTranId).join(', '),
+        });
 
         const summRec = record.create({ type: RECORDS.SHIPMENT_SUMMARY, isDynamic: false });
         summRec.setValue({ fieldId: 'name',                     value: summaryName });
@@ -321,12 +334,12 @@ define([
         summRec.setValue({ fieldId: SUMMARY.WEIGHT,             value: totalWeight });
         summRec.setValue({ fieldId: SUMMARY.VOLUME,             value: totalVolume });
         summRec.setValue({ fieldId: SUMMARY.SUMMARY_TEXT,       value: summaryText });
-        if (sessionWuId)    summRec.setValue({ fieldId: SUMMARY.WU,          value: parseInt(sessionWuId, 10) });
-        if (sessionVolUnit) summRec.setValue({ fieldId: SUMMARY.VOLUME_UNIT, value: parseInt(sessionVolUnit, 10) });
-        if (user.id)        summRec.setValue({ fieldId: SUMMARY.PACKED_BY,   value: parseInt(user.id, 10) });
+        if (sessionWuId)    summRec.setValue({ fieldId: SUMMARY.WU,           value: parseInt(sessionWuId, 10) });
+        if (sessionVolUnit) summRec.setValue({ fieldId: SUMMARY.VOLUME_UNIT,  value: parseInt(sessionVolUnit, 10) });
+        if (user.id)        summRec.setValue({ fieldId: SUMMARY.PACKED_BY,    value: parseInt(user.id, 10) });
         summRec.setValue({ fieldId: SUMMARY.PACKED_DATE, value: new Date() });
-        if (locationId)    summRec.setValue({ fieldId: SUMMARY.LOCATION,          value: parseInt(locationId, 10) });
-        if (destId)        summRec.setValue({ fieldId: SUMMARY.DELIVERY_LOCATION, value: destId });
+        if (locationId) summRec.setValue({ fieldId: SUMMARY.LOCATION,          value: parseInt(locationId, 10) });
+        if (destId)     summRec.setValue({ fieldId: SUMMARY.DELIVERY_LOCATION, value: destId });
         summRec.setValue({ fieldId: SUMMARY.ORDERS,       value: allToIds });
         summRec.setValue({ fieldId: SUMMARY.FULFILLMENTS, value: allIfIds });
         if (inventoryStatusId) summRec.setValue({ fieldId: SUMMARY.INVENTORY_STATUS, value: inventoryStatusId });
@@ -409,6 +422,7 @@ define([
     const fetchListValues = (listId) => {
         const values = [];
 
+        // Approach 1: search.create with the list script ID as the record type
         try {
             search.create({
                 type: listId,
@@ -428,6 +442,7 @@ define([
             log.error({ title: 'fetchListValues search error for ' + listId, details: e });
         }
 
+        // Approach 2: SuiteQL — table name is the list script ID
         try {
             query.runSuiteQL({ query: 'SELECT id, name FROM ' + listId + ' ORDER BY id' })
                 .results.forEach((row) => {
@@ -444,7 +459,7 @@ define([
     const getLocationInfo = (locationId) => {
         try {
             const fields  = search.lookupFields({ type: 'location', id: locationId, columns: ['name', 'country'] });
-            const country = String(fields.country || '');
+            const country = fields.country && fields.country[0] ? String(fields.country[0].value) : '';
             return { name: fields.name || '', isUS: country === 'US' };
         } catch (e) {
             log.error({ title: 'getLocationInfo error', details: e });

@@ -297,11 +297,17 @@ async function apiPost(body) {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
+let _inited = false;
+function initPage() {
+    if (_inited) return;
+    _inited = true;
     showScreen('sc-orders');
     loadPickedOrders();
     document.getElementById('scan-input').focus();
-});
+}
+window.addEventListener('DOMContentLoaded', initPage);
+// If DOMContentLoaded already fired (script at end of body, DOM ready immediately)
+if (document.readyState !== 'loading') initPage();
 
 // ─── SCREEN 1: Load picked orders ─────────────────────────────────────────────
 async function loadPickedOrders() {
@@ -322,8 +328,6 @@ async function loadPickedOrders() {
             });
         }
 
-        document.getElementById('orders-loading').style.display = 'none';
-
         if (!S.orders.length) {
             document.getElementById('orders-empty').style.display = 'block';
             return;
@@ -339,10 +343,11 @@ async function loadPickedOrders() {
             if (match) toggleOrderSel(match.toId, true);
         }
     } catch (e) {
-        document.getElementById('orders-loading').style.display = 'none';
         const el = document.getElementById('orders-error');
-        el.textContent   = 'Error loading orders: ' + e.message;
-        el.style.display = 'block';
+        if (el) { el.textContent = 'Error loading orders: ' + e.message; el.style.display = 'block'; }
+    } finally {
+        const loading = document.getElementById('orders-loading');
+        if (loading) loading.style.display = 'none';
     }
 }
 
