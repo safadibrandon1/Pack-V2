@@ -570,25 +570,25 @@ function renderAddForm() {
               pkgOpts + '</select></div>' +
             '<div class="pallet-field"><label>L</label>' +
               '<input type="number" min="0" step="0.01" value="' + esc(f.length) + '" ' +
-                     'oninput="onAddFormField(\'length\',this.value)"></div>' +
+                     'oninput="onAddFormField(\\'length\\',this.value)"></div>' +
             '<div class="pallet-field"><label>W</label>' +
               '<input type="number" min="0" step="0.01" value="' + esc(f.width) + '" ' +
-                     'oninput="onAddFormField(\'width\',this.value)"></div>' +
+                     'oninput="onAddFormField(\\'width\\',this.value)"></div>' +
             '<div class="pallet-field"><label>H&thinsp;<span class="req-star">*</span></label>' +
               '<input type="number" min="0" step="0.01" value="' + esc(f.height) + '" ' +
                      'class="' + (!(parseFloat(f.height) > 0) && f.pkgTypeId ? 'req-missing' : '') + '" ' +
-                     'oninput="onAddFormField(\'height\',this.value)"></div>' +
+                     'oninput="onAddFormField(\\'height\\',this.value)"></div>' +
             '<div class="pallet-field"><label>Dim&nbsp;Unit</label>' +
-              '<select onchange="onAddFormField(\'duId\',this.value)">' + duOpts + '</select></div>' +
+              '<select onchange="onAddFormField(\\'duId\\',this.value)">' + duOpts + '</select></div>' +
             '<div class="pallet-field"><label>Weight&thinsp;<span class="req-star">*</span></label>' +
               '<input type="number" min="0" step="0.01" value="' + esc(f.weight) + '" ' +
                      'class="' + (!(parseFloat(f.weight) > 0) && f.pkgTypeId ? 'req-missing' : '') + '" ' +
-                     'oninput="onAddFormField(\'weight\',this.value)"></div>' +
+                     'oninput="onAddFormField(\\'weight\\',this.value)"></div>' +
             '<div class="pallet-field"><label>Wt&nbsp;Unit</label>' +
-              '<select onchange="onAddFormField(\'wuId\',this.value)">' + wuOpts + '</select></div>' +
+              '<select onchange="onAddFormField(\\'wuId\\',this.value)">' + wuOpts + '</select></div>' +
             '<div class="pallet-field"><label>Quantity&thinsp;<span class="req-star">*</span></label>' +
               '<input type="number" min="1" step="1" value="' + esc(String(f.qty || 1)) + '" style="width:70px" ' +
-                     'oninput="onAddFormField(\'qty\',this.value)"></div>' +
+                     'oninput="onAddFormField(\\'qty\\',this.value)"></div>' +
             '<div class="pallet-field" style="justify-content:flex-end">' +
               '<label>&nbsp;</label>' +
               '<button class="btn btn-success btn-sm" onclick="submitAddForm()">Add Package(s)</button>' +
