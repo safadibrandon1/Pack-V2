@@ -182,12 +182,14 @@ define([
         const locInfo = locationId ? getLocationInfo(locationId) : { isUS: false };
 
         const defaultWu = locInfo.isUS
-            ? (weightUnits.find(u => u.name === 'LB') || weightUnits[0])
-            : (weightUnits.find(u => u.name === 'KG') || weightUnits[0]);
+            ? (weightUnits.find(u => u.name.toUpperCase() === 'LB') || weightUnits[0])
+            : (weightUnits.find(u => u.name.toUpperCase() === 'KG') || weightUnits[0]);
 
         const defaultDu = locInfo.isUS
-            ? (dimUnits.find(u => u.name === 'IN') || dimUnits[0])
-            : (dimUnits.find(u => u.name === 'CM') || dimUnits[0]);
+            ? (dimUnits.find(u => u.name.toUpperCase() === 'IN') || dimUnits[0])
+            : (dimUnits.find(u => u.name.toUpperCase() === 'CM') || dimUnits[0]);
+
+        log.debug({ title: 'getDropdownData', details: 'isUS=' + locInfo.isUS + ' wuKey=' + (defaultWu && defaultWu.id) + ' duKey=' + (defaultDu && defaultDu.id) });
 
         return {
             success:      true,
@@ -254,8 +256,9 @@ define([
         let volUnitCuF = null;
         try {
             const volumeUnits = getCached('volumeUnits', () => fetchListValues(LISTS.VOLUME_UNIT));
-            volUnitCuM = volumeUnits.find(u => u.name === 'CU M') || null;
-            volUnitCuF = volumeUnits.find(u => u.name === 'CU F') || null;
+            log.debug({ title: 'submitPacking: volume units available', details: volumeUnits.map(u => u.id + ':' + u.name).join(', ') });
+            volUnitCuM = volumeUnits.find(u => u.name.toUpperCase().replace(/\s+/g, ' ').trim() === 'CU M') || null;
+            volUnitCuF = volumeUnits.find(u => u.name.toUpperCase().replace(/\s+/g, ' ').trim() === 'CU F') || null;
         } catch (e) {
             log.error({ title: 'submitPacking: volume unit lookup', details: e });
         }
@@ -275,7 +278,10 @@ define([
 
         pallets.forEach((p) => {
             totalWeight += (parseFloat(p.weight) || 0);
-            const vol = (parseFloat(p.length) || 0) * (parseFloat(p.width) || 0) * (parseFloat(p.height) || 0);
+            const rawVol  = (parseFloat(p.length) || 0) * (parseFloat(p.width) || 0) * (parseFloat(p.height) || 0);
+            const duName  = duMap[String(p.duId)] || '';
+            const isMetric = duName.toUpperCase() === 'CM';
+            const vol = isMetric ? rawVol / 1000000 : rawVol / 1728;
             totalVolume += vol;
             if (!sessionWuId    && p.wuId) sessionWuId    = p.wuId;
             if (!sessionVolUnit && p.duId) sessionVolUnit = getVolUnitId(p.duId);
@@ -361,7 +367,10 @@ define([
         let shipUnitCount = 0;
 
         pallets.forEach((pallet, palletIdx) => {
-            const vol       = (parseFloat(pallet.length) || 0) * (parseFloat(pallet.width) || 0) * (parseFloat(pallet.height) || 0);
+            const rawVol    = (parseFloat(pallet.length) || 0) * (parseFloat(pallet.width) || 0) * (parseFloat(pallet.height) || 0);
+            const duNameP   = duMap[String(pallet.duId)] || '';
+            const isMetricP = duNameP.toUpperCase() === 'CM';
+            const vol       = isMetricP ? rawVol / 1000000 : rawVol / 1728;
             const volUnitId = getVolUnitId(pallet.duId);
 
             const unitRec = record.create({ type: RECORDS.SHIP_UNIT, isDynamic: false });
@@ -458,8 +467,14 @@ define([
 
     const getLocationInfo = (locationId) => {
         try {
-            const fields  = search.lookupFields({ type: 'location', id: locationId, columns: ['name', 'country'] });
-            const country = fields.country && fields.country[0] ? String(fields.country[0].value) : '';
+            const fields = search.lookupFields({ type: 'location', id: locationId, columns: ['name', 'country'] });
+            let country  = '';
+            if (Array.isArray(fields.country) && fields.country[0]) {
+                country = String(fields.country[0].value || '');
+            } else if (typeof fields.country === 'string') {
+                country = fields.country;
+            }
+            log.debug({ title: 'getLocationInfo', details: 'id=' + locationId + ' country=' + country });
             return { name: fields.name || '', isUS: country === 'US' };
         } catch (e) {
             log.error({ title: 'getLocationInfo error', details: e });

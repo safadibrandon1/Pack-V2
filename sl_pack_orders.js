@@ -598,16 +598,28 @@ function renderAddForm() {
         '</div>';
 }
 
+// Returns the weight unit key that matches the dim unit (CM→KG, IN→LB)
+function syncWuFromDu(duKey) {
+    const du = (S.dropdowns.dimUnits || []).find(u => u.key === duKey);
+    if (!du) return null;
+    const targetLabel = du.label.toUpperCase() === 'CM' ? 'KG' : 'LB';
+    const wu = (S.dropdowns.weightUnits || []).find(u => u.label.toUpperCase() === targetLabel);
+    return wu ? wu.key : null;
+}
+
 function onAddFormPkgType(pkgTypeId) {
     S.addForm.pkgTypeId = pkgTypeId;
     const pt = (S.dropdowns.packageTypes || []).find(x => x.key === pkgTypeId);
     if (pt) {
         S.addForm.length = pt.length || '';
         S.addForm.width  = pt.width  || '';
-        // Auto-set dim unit from package type if it has one
         if (pt.dimUnit) {
             const du = (S.dropdowns.dimUnits || []).find(u => u.label === pt.dimUnit);
-            if (du) S.addForm.duId = du.key;
+            if (du) {
+                S.addForm.duId = du.key;
+                const newWuId = syncWuFromDu(du.key);
+                if (newWuId) S.addForm.wuId = newWuId;
+            }
         }
     }
     renderAddForm();
@@ -753,7 +765,11 @@ function onPkgTypeChange(pid, pkgTypeId) {
         p.width  = pt.width  || '';
         if (pt.dimUnit) {
             const du = (S.dropdowns.dimUnits || []).find(u => u.label === pt.dimUnit);
-            if (du) p.duId = du.key;
+            if (du) {
+                p.duId = du.key;
+                const newWuId = syncWuFromDu(du.key);
+                if (newWuId) p.wuId = newWuId;
+            }
         }
     }
     const card = document.querySelector('.pallet-card[data-pid="' + pid + '"]');
