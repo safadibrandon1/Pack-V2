@@ -89,6 +89,10 @@ define([
     // grouped by Transfer Order for the selection UI.
 
     const getPickedFulfillments = () => {
+        const user       = runtime.getCurrentUser();
+        const locationId = user.location;
+        const locInfo    = locationId ? getLocationInfo(locationId) : { name: '' };
+
         const ifRows = [];
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - 90);
@@ -141,7 +145,12 @@ define([
             toMap[row.toId].fulfillments.push({ ifId: row.ifId, ifTranId: row.ifTranId });
         });
 
-        return { success: true, orders: Object.values(toMap) };
+        return {
+            success:      true,
+            locationId,
+            locationName: locInfo.name,
+            orders:       Object.values(toMap),
+        };
     };
 
     // ─── getDropdownData ──────────────────────────────────────────────────────

@@ -186,7 +186,7 @@ define([
 <!-- ═══════════════════════════════════════════════════════════════════════════
      SCREEN 1 — Order Selection
      ═══════════════════════════════════════════════════════════════════════════ -->
-<div class="screen" id="sc-orders">
+<div class="screen active" id="sc-orders">
   <header>
     <h1>Pack Orders</h1>
     <span class="loc" id="hdr-location">Loading…</span>
