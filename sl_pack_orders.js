@@ -522,8 +522,8 @@ function esc(v) {
 // ─── SCREEN 2: Builder UI ─────────────────────────────────────────────────────
 function renderBuilderUI() {
     const wrap = document.getElementById('builder-loading-wrap');
-    wrap.style.overflow = 'hidden';
-    wrap.style.padding  = '10px';
+    wrap.style.overflowY = 'auto';
+    wrap.style.padding   = '10px';
 
     wrap.innerHTML =
         '<div id="add-form-wrap"></div>' +
