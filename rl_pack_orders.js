@@ -253,22 +253,23 @@ define([
         dimUnitsData.forEach(u => { duMap[String(u.id)] = u.name; });
 
         let volUnitCuM = null;
-        let volUnitCuF = null;
         try {
             const volumeUnits = getCached('volumeUnits', () => fetchListValues(LISTS.VOLUME_UNIT));
             log.debug({ title: 'submitPacking: volume units available', details: volumeUnits.map(u => u.id + ':' + u.name).join(', ') });
             volUnitCuM = volumeUnits.find(u => u.name.toUpperCase().replace(/\s+/g, ' ').trim() === 'CU M') || null;
-            volUnitCuF = volumeUnits.find(u => u.name.toUpperCase().replace(/\s+/g, ' ').trim() === 'CU F') || null;
         } catch (e) {
             log.error({ title: 'submitPacking: volume unit lookup', details: e });
         }
 
-        const getVolUnitId = (duId) => {
-            const duName   = duMap[String(duId)] || '';
-            const isMetric = duName.toUpperCase() === 'CM';
-            const match    = isMetric ? volUnitCuM : volUnitCuF;
-            return match ? String(match.id) : null;
+        // Volume is always stored in CU M.
+        // IN³ → CU M: divide by 61,023.744  (1 m³ = 61,023.744 in³)
+        // CM³ → CU M: divide by 1,000,000
+        const toCuM = (rawVol, duId) => {
+            const duName = duMap[String(duId)] || '';
+            return duName.toUpperCase() === 'CM' ? rawVol / 1000000 : rawVol / 61023.744;
         };
+
+        const volUnitId = volUnitCuM ? String(volUnitCuM.id) : null;
 
         // ── 2. Calculate session aggregates ───────────────────────────────────
         let totalWeight    = 0;
@@ -278,14 +279,11 @@ define([
 
         pallets.forEach((p) => {
             totalWeight += (parseFloat(p.weight) || 0);
-            const rawVol  = (parseFloat(p.length) || 0) * (parseFloat(p.width) || 0) * (parseFloat(p.height) || 0);
-            const duName  = duMap[String(p.duId)] || '';
-            const isMetric = duName.toUpperCase() === 'CM';
-            const vol = isMetric ? rawVol / 1000000 : rawVol / 1728;
-            totalVolume += vol;
-            if (!sessionWuId    && p.wuId) sessionWuId    = p.wuId;
-            if (!sessionVolUnit && p.duId) sessionVolUnit = getVolUnitId(p.duId);
+            const rawVol = (parseFloat(p.length) || 0) * (parseFloat(p.width) || 0) * (parseFloat(p.height) || 0);
+            totalVolume += toCuM(rawVol, p.duId);
+            if (!sessionWuId) sessionWuId = p.wuId || null;
         });
+        sessionVolUnit = volUnitId;
 
         // ── 3. Build lookup maps for summary text ─────────────────────────────
         const pkgTypeMap = {};
@@ -367,11 +365,8 @@ define([
         let shipUnitCount = 0;
 
         pallets.forEach((pallet, palletIdx) => {
-            const rawVol    = (parseFloat(pallet.length) || 0) * (parseFloat(pallet.width) || 0) * (parseFloat(pallet.height) || 0);
-            const duNameP   = duMap[String(pallet.duId)] || '';
-            const isMetricP = duNameP.toUpperCase() === 'CM';
-            const vol       = isMetricP ? rawVol / 1000000 : rawVol / 1728;
-            const volUnitId = getVolUnitId(pallet.duId);
+            const rawVol = (parseFloat(pallet.length) || 0) * (parseFloat(pallet.width) || 0) * (parseFloat(pallet.height) || 0);
+            const vol    = toCuM(rawVol, pallet.duId);
 
             const unitRec = record.create({ type: RECORDS.SHIP_UNIT, isDynamic: false });
             unitRec.setValue({ fieldId: SHIP_UNIT.ORDERS,   value: allToIds });
